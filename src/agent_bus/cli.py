@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     peers = sub.add_parser("peers", help="list other agents on the bus")
     peers.add_argument("--json", action="store_true")
 
+    sub.add_parser("serve", help="run the MCP stdio server (Claude Code starts this)")
+
     tail = sub.add_parser("tail", help="print the event log")
     tail.add_argument("-f", "--follow", action="store_true", help="keep printing new events")
     tail.add_argument("--json", action="store_true", help="raw log lines")
@@ -92,6 +94,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         store = Store(cfg.bus_dir)
         if args.command == "tail":
             return _tail(store, follow=args.follow, raw=args.json)
+        if args.command == "serve":
+            import anyio
+
+            from agent_bus.server import serve
+
+            anyio.run(serve, cfg)
+            return 0
         bus = Bus(store, cfg.require_agent(), cfg.max_agent_turns)
         if args.command == "send":
             body = sys.stdin.read() if args.body == "-" else args.body

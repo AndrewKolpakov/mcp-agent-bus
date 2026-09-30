@@ -5,6 +5,3 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-spike/*.log
-spike/inbox.txt
-spike/live/hooks.log

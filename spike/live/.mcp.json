@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "spike": {
-      "command": "uv",
-      "args": ["run", "--quiet", "--script", "../channel_spike.py"]
-    }
-  }
-}
