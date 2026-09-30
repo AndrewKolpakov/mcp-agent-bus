@@ -7,7 +7,8 @@
 ## Цель и рамки v1
 
 - Два агента на одной машине и под одним пользователем ОС. Аккаунты
-  разделены через `CLAUDE_CONFIG_DIR` (`~/.claude` и `~/.claude-personal`).
+  разделены через `CLAUDE_CONFIG_DIR` (`~/.claude-personal` и
+  `~/.claude-personal-a.k`). Оба личные, на Max.
 - Участие в шине включается явно для конкретной сессии. Остальные сессии
   аккаунта плагин не затрагивает, см. «Участие сессии».
 - Агент отправляет сообщение инструментом. Напарник получает его как событие
@@ -22,7 +23,7 @@
 ## Архитектура
 
 ```text
- сессия A (~/.claude)                        сессия B (~/.claude-personal)
+ сессия A (~/.claude-personal)              сессия B (~/.claude-personal-a.k)
  ┌──────────────────────┐                    ┌──────────────────────┐
  │ Claude Code          │                    │ Claude Code          │
  │  ├ hooks ─┐          │                    │          ┌─ hooks ┤  │
@@ -305,11 +306,35 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
 | Вопрос | Статус | Ответ |
 | :- | :- | :- |
 | Q1 | Закрыт | Фиксируем `mcp>=1.30,<2`, подробности ниже |
-| Q2 | Закрыт без Claude Code | Сырое уведомление в исходящий поток работает, подробности ниже |
-| Q3 | Ждёт живого запуска | Инструкция, часть B |
-| Q4 | Ждёт живого запуска | Инструкция, часть A и фоновая сессия |
-| Q5 | Ждёт живого запуска | Инструкция, часть A |
-| Q6 | Ждёт живого запуска | Инструкция, часть A |
+| Q2 | Закрыт | Сырое уведомление в исходящий поток работает и в живой сессии |
+| Q3 | Закрыт | `source="plugin:agent-bus-spike:bus"`, инструмент `mcp__plugin_agent-bus-spike_bus__reply` |
+| Q4 | Закрыт для интерактивной сессии | Событие будит простаивающую сессию и запускает ход, подробности ниже. Фоновая не проверялась |
+| Q5 | Закрыт | Кодовое слово из `instructions` пришло в вызове `reply` |
+| Q6 | Открыт | В запуске через плагин не было хуков. Нужен повтор части B с хуками плагина |
+
+Живой запуск прошёл 2026-09-30 на Claude Code 2.1.285 под
+`~/.claude-personal-a.k`. Разбор: `spike/report.py` и
+`spike/transcript_view.py`.
+
+- **Протокол в живой сессии.** Claude Code сначала шлёт `server/discover`
+  с ревизией `2026-07-28`. Сервер на 1.30 отвечает ошибкой `-32602`, и
+  Claude Code откатывается на `initialize` с `2025-11-25`. Канал
+  регистрируется.
+- **Запись события в транскрипте.** Событие хранится как запись роли
+  `user` с `origin: {"kind": "channel", "server": "plugin:agent-bus-spike:bus"}`
+  и `isMeta: true`. Промпт человека имеет `origin.kind = "human"`. По этому
+  полю хуки и разбор отличают одно от другого.
+- **Пробуждение.** Событие пришло в простаивающую сессию, и через 3 секунды
+  модель сама начала ход. Но Haiku ответил только текстом «вижу тестовый
+  пинг» и не вызвал `reply`, хотя `instructions` этого требовали. Инструмент
+  был вызван лишь после следующего промпта человека. Вывод для этапа 3:
+  на пробуждение нельзя полагаться как на гарантию действия. Нужна модель
+  не слабее Sonnet, жёсткая формулировка в `instructions` и навыке, а
+  непрочитанное подхватывает хук `Stop`.
+- **Голый сервер не стал каналом.** Во всех пяти запусках с
+  `server:spike` из `.mcp.json` проекта сервер подключался и слал события,
+  но в транскриптах нет ни одной записи канала. Причина не выяснена. Для
+  v1 это не важно, потому что поставка идёт плагином, а он работает.
 
 - **Q1.** На `mcp` 1.30 сервер объявляет `experimental: {"claude/channel": {}}`,
   отдаёт `instructions` и согласует ту ревизию, которую прислал клиент.
@@ -350,14 +375,15 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
 
 ```bash
 # один раз в каждом каталоге конфигурации
-claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
-claude plugin install agent-bus@agent-bus-dev
-claude plugin configure agent-bus        # agent_name=main
-
 export CLAUDE_CONFIG_DIR=~/.claude-personal
 claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
 claude plugin install agent-bus@agent-bus-dev
 claude plugin configure agent-bus        # agent_name=personal
+
+export CLAUDE_CONFIG_DIR=~/.claude-personal-a.k
+claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
+claude plugin install agent-bus@agent-bus-dev
+claude plugin configure agent-bus        # agent_name=ak
 
 # запуск каждой сессии
 AGENT_BUS_SESSION=1 claude --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
