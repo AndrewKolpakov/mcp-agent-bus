@@ -42,6 +42,11 @@ python_version = "3.12"
 strict = true
 files = ["src", "tests"]
 warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
 
 [tool.pyright]
 venvPath = "."
