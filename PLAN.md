@@ -316,7 +316,7 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
 # один раз в каждом каталоге конфигурации
 claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
 claude plugin install agent-bus@agent-bus-dev
-claude plugin configure agent-bus        # agent_name=work
+claude plugin configure agent-bus        # agent_name=main
 
 export CLAUDE_CONFIG_DIR=~/.claude-personal
 claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
@@ -334,9 +334,12 @@ AGENT_BUS_SESSION=1 claude --dangerously-load-development-channels plugin:agent-
 
 - **Research preview.** Синтаксис флагов и контракт канала могут
   измениться. Всё, что касается канала, изолировано в `server.py`.
-- **План рабочего аккаунта.** Если он в организации Team или Enterprise,
-  без `channelsEnabled` события молча не доходят. Это нужно выяснить до
-  этапа 5. Запасной путь через хук `Stop` работает и без канала.
+- **Планы аккаунтов.** Оба аккаунта личные, на Max, без организации. Для
+  них проверки `channelsEnabled` и `allowedChannelPlugins` не действуют:
+  канал включается только флагом при запуске сессии. Если один из
+  аккаунтов перейдёт в организацию Team или Enterprise, без
+  `channelsEnabled` события начнут молча теряться. Тогда останется
+  запасной путь через хук `Stop`.
 - **`uv` в `PATH`.** Процесс, который поднимает Claude Code, может не видеть
   `uv` из Homebrew. `scripts/run.sh` ищет его по известным путям и падает с
   понятной ошибкой.
