@@ -1,0 +1,12 @@
+{
+  "name": "agent-bus-spike-dev",
+  "description": "Local development marketplace for the agent-bus channel spike",
+  "owner": { "name": "Andrew Kolpakov" },
+  "plugins": [
+    {
+      "name": "agent-bus-spike",
+      "source": "./",
+      "description": "Stage-0 channel spike"
+    }
+  ]
+}
