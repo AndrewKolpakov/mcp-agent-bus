@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -141,6 +142,25 @@ def test_a_session_off_the_bus_lists_no_tools_and_pushes_nothing(
     _alice(bus_dir).send("bob", "anyone?")
     assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
     assert Registry(Store(bus_dir)).live() == {}
+
+
+def test_opting_in_without_an_agent_name_says_what_to_configure(spawn: Spawn) -> None:
+    unnamed = spawn({"AGENT_BUS_SESSION": "1"}, handshake=False)
+    init = unnamed.handshake()["result"]
+    assert "claude plugin configure agent-bus" in init["instructions"]
+    assert unnamed.request("tools/list")["result"]["tools"] == []
+
+
+def test_a_session_that_loses_its_claim_stops_pushing(spawn: Spawn, bus_dir: Path) -> None:
+    server = spawn({**ON_BUS, "AGENT_BUS_HEARTBEAT_SECONDS": "0.3"})
+    registry = Registry(Store(bus_dir))
+    record = registry.read("bob")
+    assert record is not None
+    # Another live session takes over, as after this one slept past STALE_AFTER.
+    registry._write(record.model_copy(update={"session": "someone-else", "pid": os.getpid()}))
+    time.sleep(1.5)
+    _alice(bus_dir).send("bob", "who gets this?")
+    assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
 
 
 def test_a_second_session_of_the_same_agent_gets_no_pushes(spawn: Spawn, bus_dir: Path) -> None:

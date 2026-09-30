@@ -12,7 +12,7 @@ import sys
 import time
 from collections.abc import Sequence
 
-from agent_bus import __version__, config
+from agent_bus import __version__, config, hooks
 from agent_bus.bus import Bus, BusError
 from agent_bus.models import KINDS, Event, MessageEvent
 from agent_bus.store import Store
@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     peers.add_argument("--json", action="store_true")
 
     sub.add_parser("serve", help="run the MCP stdio server (Claude Code starts this)")
+
+    hook = sub.add_parser("hook", help="run a Claude Code hook (Claude Code starts this)")
+    hook.add_argument("event", choices=hooks.EVENTS)
 
     tail = sub.add_parser("tail", help="print the event log")
     tail.add_argument("-f", "--follow", action="store_true", help="keep printing new events")
@@ -89,6 +92,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 2
+    if args.command == "hook":
+        # Before config.load: a hook handles its own configuration errors and
+        # always exits 0, so a misconfigured bus never blocks a turn.
+        return hooks.run(args.event)
     try:
         cfg = config.load(bus_dir=args.bus_dir, agent=args.agent)
         store = Store(cfg.bus_dir)

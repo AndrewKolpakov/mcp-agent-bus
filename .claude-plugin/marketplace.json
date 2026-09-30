@@ -1,0 +1,12 @@
+{
+  "name": "agent-bus-dev",
+  "description": "Local development marketplace for the agent-bus plugin",
+  "owner": { "name": "Andrew Kolpakov" },
+  "plugins": [
+    {
+      "name": "agent-bus",
+      "source": "./",
+      "description": "Message bus between Claude Code sessions on different accounts"
+    }
+  ]
+}

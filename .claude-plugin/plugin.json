@@ -1,0 +1,44 @@
+{
+  "name": "agent-bus",
+  "displayName": "agent-bus",
+  "version": "0.1.0",
+  "description": "Message bus between Claude Code sessions on different accounts: an MCP channel that wakes the peer session, bus tools, hooks and a protocol skill",
+  "author": { "name": "Andrew Kolpakov" },
+  "keywords": ["channels", "multi-agent", "mcp"],
+  "mcpServers": {
+    "bus": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+      "args": ["serve"],
+      "env": {
+        "AGENT_BUS_NAME": "${user_config.agent_name}",
+        "AGENT_BUS_DIR": "${user_config.bus_dir}",
+        "AGENT_BUS_MAX_TURNS": "${user_config.max_agent_turns}"
+      }
+    }
+  },
+  "channels": [
+    { "server": "bus", "displayName": "agent-bus" }
+  ],
+  "userConfig": {
+    "agent_name": {
+      "type": "string",
+      "title": "Agent name",
+      "description": "This account's name on the bus: 1-32 of a-z, 0-9, _ or -. Must differ between accounts.",
+      "required": true
+    },
+    "bus_dir": {
+      "type": "directory",
+      "title": "Bus directory",
+      "description": "Directory shared by every account on this machine; holds the event log and session registry.",
+      "default": "~/.agent-bus"
+    },
+    "max_agent_turns": {
+      "type": "number",
+      "title": "Agent-to-agent message limit",
+      "description": "Messages two agents may exchange before a human has to speak again.",
+      "default": 6,
+      "min": 1,
+      "max": 50
+    }
+  }
+}

@@ -249,7 +249,11 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
 | `SessionStart` | Кратко сообщает контекст: кто я, кто напарник, сколько непрочитанных |
 | `UserPromptSubmit` | Пишет `human_turn`, кроме промптов, которые начинаются с `<channel source="plugin:agent-bus:bus"` |
 | `Stop` | Если есть непрочитанные и `stop_hook_active` не выставлен, возвращает `additionalContext` со списком непрочитанных. Claude Code сам ограничивает цепочку продолжений восемью подряд |
-| `SessionEnd` | Убирает запись сессии из реестра, если сервер не успел |
+
+Хука `SessionEnd` нет. У этого события общий бюджет 1,5 секунды, и
+холодный `uv run` в него не укладывается. Он и не нужен: сервер сам
+освобождает канал по концу stdin, а запись упавшего процесса отсекает
+проверка pid в реестре.
 
 Хук `Stop` — запасной путь на случай, если канал заблокирован или событие
 пришло, пока сессия была закрыта. Основной путь — событие канала.
@@ -277,7 +281,7 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
 | 1 | Каркас проекта. **Готов** | Проходят `uv run ruff check`, `uv run mypy` и `pytest` с тестом точки входа |
 | 2 | Модель и хранилище, CLI `send/inbox/ack/peers/tail`. **Готов** | Проходят юнит-тесты на flock, частичные строки и производное состояние |
 | 3 | MCP-сервер: инструменты, наблюдатель, досылка, лимит. **Готов** | Интеграционный тест получает уведомление канала по stdio |
-| 4 | Упаковка плагина: манифест с `mcpServers` внутри, хуки, навык | `claude plugin validate .` проходит без ошибок |
+| 4 | Упаковка плагина: манифест с `mcpServers` внутри, хуки, навык. **Готов** | `claude plugin validate .` проходит без ошибок |
 | 5 | Запуск на двух аккаунтах | Проходит ручной smoke: A пишет, B просыпается и отвечает, A получает ответ |
 | 6 | Доводка: README, `agent-bus tail`, ротация журнала по желанию | README описывает установку с нуля |
 
@@ -352,8 +356,10 @@ CLI, `agent-bus hook <event>`, и получают `bus_dir` и `agent_name` и�
   одобрил `reply`. В режиме по умолчанию вызов остановился бы на диалоге и
   ждал человека. Плагин не может выдать себе разрешение: из его
   `settings` действуют только `agent` и `subagentStatusLine`. Поэтому
-  установка шины включает правило в `permissions.allow` каждого аккаунта,
-  например `mcp__plugin_agent-bus_bus__*`.
+  строка запуска сессии на шине содержит
+  `--allowedTools mcp__plugin_agent-bus_bus`: это правило разрешает все
+  инструменты сервера, и разрешение остаётся на уровне сессии, как и
+  `AGENT_BUS_SESSION=1`. Форма правила сверена с документацией разрешений.
 - **Голый сервер не стал каналом.** Во всех пяти запусках с
   `server:spike` из `.mcp.json` проекта сервер подключался и слал события,
   но в транскриптах нет ни одной записи канала. Причина не выяснена. Для
@@ -408,12 +414,13 @@ claude plugin marketplace add ~/Projects/Personal/mcp-agent-bus
 claude plugin install agent-bus@agent-bus-dev
 claude plugin configure agent-bus        # agent_name=ak
 
-# в settings.json каждого аккаунта, чтобы ход от события не ждал диалога:
-#   "permissions": { "allow": ["mcp__plugin_agent-bus_bus__*"] }
-
-# запуск каждой сессии
-AGENT_BUS_SESSION=1 claude --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
+# запуск каждой сессии на шине; --allowedTools, чтобы ход от события не ждал диалога
+AGENT_BUS_SESSION=1 claude --model sonnet \
+  --allowedTools mcp__plugin_agent-bus_bus \
+  --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
 ```
+
+Пошаговая инструкция этапа 5 с проверками — в [docs/bring-up.md](docs/bring-up.md).
 
 Маркетплейс из локального каталога загружает плагин на месте, поэтому
 правки в репозитории подхватываются без переустановки.
