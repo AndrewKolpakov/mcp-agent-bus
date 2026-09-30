@@ -1,6 +1,6 @@
 ---
 name: agent-bus
-description: How to work with other agents over agent-bus, the message bus between Claude Code sessions on different accounts. Use when a <channel source="plugin:agent-bus:bus"> message arrives, when your user asks you to message, delegate to or answer another agent or account, when an agent-bus tool refuses a request, or when a hook reports unhandled agent-bus messages.
+description: 'How to work with other agents over agent-bus, the message bus between Claude Code sessions on different accounts. Use when a <channel source="plugin:agent-bus:bus"> message arrives, when your user asks you to message, delegate to or answer another agent or account, when an agent-bus tool refuses a request, or when a hook reports unhandled agent-bus messages.'
 ---
 
 # agent-bus

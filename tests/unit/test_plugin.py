@@ -15,6 +15,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agent_bus import __version__
 from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME, SERVER_KEY, TOOL_PREFIX
 from agent_bus.server import INSTRUCTIONS_ON_BUS, TOOLS
@@ -64,6 +66,15 @@ def test_instructions_and_skill_use_the_real_names() -> None:
     assert f'<channel source="{CHANNEL_SOURCE}"' in skill
     for tool in TOOLS:
         assert f"`{TOOL_PREFIX}{tool.name}`" in skill
+
+
+def test_skill_frontmatter_parses_as_yaml() -> None:
+    # A frontmatter that fails to parse drops the skill without an error.
+    text = (ROOT / "skills" / "agent-bus" / "SKILL.md").read_text()
+    _, frontmatter, _ = text.split("---\n", 2)
+    meta = yaml.safe_load(frontmatter)
+    assert meta["name"] == PLUGIN_NAME
+    assert f'<channel source="{CHANNEL_SOURCE}">' in meta["description"]
 
 
 def test_hooks_call_run_sh_with_known_events() -> None:

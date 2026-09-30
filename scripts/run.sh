@@ -14,7 +14,7 @@ fi
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 UV="$(command -v uv 2>/dev/null || true)"
-for candidate in "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+for candidate in "${HOME:-}/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
     if [ -n "$UV" ]; then
         break
     fi
