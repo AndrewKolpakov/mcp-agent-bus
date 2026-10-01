@@ -8,25 +8,30 @@ Only a session launched with AGENT_BUS_SESSION=1 joins the bus. Every other
 session that has the plugin enabled still gets a live server, so `/mcp` does
 not report it as failed, but that server lists no tools and pushes nothing.
 
-Claude Code silently drops a channel event in two cases (stage 5 live
-runs): one sent while the server's connection is still being set up, and
-any event in a background (`--bg`) session. A dropped push still writes
-`delivered`, and a delivered message is never replayed, so the server
-avoids both cases:
+Claude Code accepts a channel notification without acknowledging it and
+drops it silently when the session cannot take it (stage 5 live runs):
+while the connection is still being set up, in a background (`--bg`) fork,
+which is started without the channels flag, and in a foreground process
+whose conversation was moved to the background, which lives on with its
+server still attached. So `delivered` is written only once the event shows
+up in the session transcript (transcript.py):
 
 - A background session (CLAUDE_JOB_DIR set) never takes the channel.
 - An interactive session pushes nothing until Claude Code has listed its
-  tools, the last step of connecting that the server can see, and then
-  SETTLE_SECONDS more. No signal says the channel listener is registered;
-  pushes sent at connect were lost, pushes sent tens of seconds later
-  always arrived. The SessionStart hook is no signal: it fires before the
-  server even starts.
+  tools and SETTLE_SECONDS more have passed.
+- A push that does not reach the transcript within CONFIRM_SECONDS marks
+  the session deaf: it releases the channel, the message stays undelivered,
+  and another live session of the agent takes the channel and replays it.
+  A late confirmation writes `delivered` and lets the session claim again.
+- Without a transcript to read (no session id, or the file is not found)
+  the push counts as delivered at once, as before confirmation existed.
 
-Delivery then starts by pushing every message to this agent that has no
-`delivered` event, and follows the log from the offset of that same read.
-Taking the offset from the replay's own read is what keeps a message from
-being pushed twice or skipped. Messages delivered earlier but never acked
-are not pushed again; the hooks report them instead.
+A session without the channel keeps trying to claim it, so a new
+foreground session takes over from one that went deaf or ended. On every
+gain of the channel the server pushes each message to this agent that has
+no `delivered` event and is not awaiting confirmation, then follows the log
+from the offset of that same read, which keeps a message from being pushed
+twice or skipped by one session.
 """
 
 from __future__ import annotations
@@ -35,6 +40,8 @@ import json
 import logging
 import os
 import signal
+import time
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -52,6 +59,7 @@ from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME
 from agent_bus.registry import HEARTBEAT_SECONDS, Registry
 from agent_bus.state import BusState
 from agent_bus.store import Store
+from agent_bus.transcript import Transcript
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +68,9 @@ CHANNEL_METHOD = "notifications/claude/channel"
 POLL_SECONDS = 0.3
 SETTLE_SECONDS = 5.0
 TOOLS_LIST_TIMEOUT_SECONDS = 60.0
+# A busy session writes a queued event to its transcript only when its
+# current turn ends, so the window covers a long turn, not a round trip.
+CONFIRM_SECONDS = 120.0
 DISCOVER_PROBE_LOG = "Failed to validate request"
 
 INSTRUCTIONS_ON_BUS = """\
@@ -87,8 +98,9 @@ kind="await_human", then stop and let your user decide how to continue."""
 
 SECOND_SESSION_NOTE = """
 
-Another session of agent "{me}" holds the channel, so new messages are not pushed \
-into this session. Use the inbox tool to read them."""
+Another session of agent "{me}" holds the channel right now, so new messages go \
+there. This session takes the channel over if that one ends or stops receiving; \
+until then, read messages with the inbox tool."""
 
 BACKGROUND_NOTE = """
 
@@ -188,12 +200,21 @@ class BusServer:
         background: bool = False,
         claude_session: str | None = None,
         settle_seconds: float = SETTLE_SECONDS,
+        transcript: Transcript | None = None,
+        confirm_seconds: float = CONFIRM_SECONDS,
     ) -> None:
         self.cfg = cfg
         self.background = background
         self.claude_session = claude_session
         self.settle_seconds = settle_seconds
+        self.transcript = transcript
+        self.confirm_seconds = confirm_seconds
         self.tools_listed = anyio.Event()
+        self.pending: dict[str, float] = {}
+        """msg_id -> monotonic deadline for pushes awaiting the transcript."""
+        self.late: set[str] = set()
+        """Pushes whose deadline passed; still confirmed if they show up."""
+        self.deaf = False
         self.store = Store(cfg.bus_dir)
         self.session = new_id()
         self.on_bus = cfg.on_bus and cfg.agent is not None
@@ -272,8 +293,55 @@ class BusServer:
     ) -> None:
         assert self.bus is not None
         await write.send(channel_notification(message, redelivery=redelivery))
-        self.bus.mark_delivered(message.id, self.session)
-        log.info("pushed %s from %s redelivery=%s", message.id, message.sender, redelivery)
+        if self.transcript is not None and self.transcript.path() is not None:
+            self.pending[message.id] = time.monotonic() + self.confirm_seconds
+            state = "awaiting transcript"
+        else:
+            self.bus.mark_delivered(message.id, self.session)
+            state = "delivered unconfirmed (no transcript)"
+        log.info(
+            "pushed %s from %s redelivery=%s %s", message.id, message.sender, redelivery, state
+        )
+
+    def confirm(self) -> None:
+        """Settle pushes against the transcript; go deaf on an overdue one."""
+        assert self.bus is not None
+        if self.transcript is None:
+            return
+        seen = self.transcript.new_channel_ids()
+        settled = seen & (set(self.pending) | self.late)
+        if settled:
+            delivered = BusState.from_events(self.store.read_all().events).delivered
+            for msg_id in sorted(settled):
+                self.pending.pop(msg_id, None)
+                self.late.discard(msg_id)
+                if msg_id not in delivered:
+                    self.bus.mark_delivered(msg_id, self.session)
+                log.info("confirmed %s in transcript", msg_id)
+            if self.deaf:
+                self.deaf = False
+                log.info("session %s receives again; may claim the channel", self.claude_session)
+        now = time.monotonic()
+        overdue = [msg_id for msg_id, deadline in self.pending.items() if deadline <= now]
+        if overdue:
+            for msg_id in overdue:
+                del self.pending[msg_id]
+                self.late.add(msg_id)
+            self.deaf = True
+            if self.owns_channel:
+                self.owns_channel = False
+                self.registry.release(self.bus.me, self.session)
+            log.warning(
+                "session %s is deaf: %s not in its transcript after %ss; released the channel",
+                self.claude_session,
+                ",".join(overdue),
+                self.confirm_seconds,
+            )
+
+    async def confirm_loop(self) -> None:
+        while True:
+            await anyio.sleep(POLL_SECONDS)
+            self.confirm()
 
     async def wait_connected(self) -> None:
         """Hold pushes until the connection is set up, then SETTLE_SECONDS more."""
@@ -291,29 +359,47 @@ class BusServer:
         me = self.bus.me
         await initialized.wait()
         await self.wait_connected()
-        snapshot = self.store.read_all()
-        offset = snapshot.offset
-        for message in BusState.from_events(snapshot.events).undelivered(me):
-            await self.push(write, message, redelivery=True)
-        while self.owns_channel:
-            await anyio.sleep(POLL_SECONDS)
-            result = self.store.read_from(offset)
-            offset = result.offset
-            for event in result.events:
-                if isinstance(event, MessageEvent) and event.to == me and self.owns_channel:
-                    await self.push(write, event, redelivery=False)
-        log.warning("stopped pushing for %s: another session holds the channel", me)
+        while True:
+            while not self.holding():
+                await anyio.sleep(POLL_SECONDS)
+            snapshot = self.store.read_all()
+            offset = snapshot.offset
+            mine = self.pending.keys() | self.late
+            for message in BusState.from_events(snapshot.events).undelivered(me):
+                if message.id not in mine:
+                    await self.push(write, message, redelivery=True)
+            while self.holding():
+                await anyio.sleep(POLL_SECONDS)
+                result = self.store.read_from(offset)
+                offset = result.offset
+                for event in result.events:
+                    if isinstance(event, MessageEvent) and event.to == me and self.owns_channel:
+                        await self.push(write, event, redelivery=False)
+            log.warning("stopped pushing for %s: this session no longer holds the channel", me)
 
-    async def heartbeat(self, interval: float) -> None:
-        # A stale heartbeat (a laptop asleep past STALE_AFTER) lets another
-        # session claim the channel; once that happens this one stops pushing,
-        # so no message is delivered to two sessions.
+    def holding(self) -> bool:
+        # A method, not the attribute: other tasks flip owns_channel across
+        # every await, and a type checker must not narrow it inside a loop.
+        return self.owns_channel
+
+    def tend_channel(self) -> None:
+        """Keep our claim fresh, or try to take the channel when it is free."""
         assert self.bus is not None
-        while self.owns_channel:
-            await anyio.sleep(interval)
+        if self.owns_channel:
+            # A stale heartbeat (a laptop asleep past STALE_AFTER) lets another
+            # session claim the channel; this one then stops pushing, so no
+            # message is pushed into two sessions.
             if not self.registry.heartbeat(self.bus.me, self.session):
                 self.owns_channel = False
                 log.warning("lost the channel for %s to another session", self.bus.me)
+        elif not self.deaf and self.registry.claim(self.bus.me, self.session, os.getpid()):
+            self.owns_channel = True
+            log.info("took the channel for %s", self.bus.me)
+
+    async def channel_loop(self, interval: float) -> None:
+        while True:
+            await anyio.sleep(interval)
+            self.tend_channel()
 
 
 def build_server(app: BusServer) -> Server[Any, Any]:
@@ -397,11 +483,15 @@ async def serve(cfg: Config) -> None:
     if cfg.on_bus and cfg.agent is None:
         log.warning("%s=1 but agent_name is not configured; staying off the bus", SESSION_OPT_IN)
     heartbeat_seconds = float(os.environ.get("AGENT_BUS_HEARTBEAT_SECONDS", HEARTBEAT_SECONDS))
+    claude_session = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser()
     app = BusServer(
         cfg,
         background=bool(os.environ.get("CLAUDE_JOB_DIR")),
-        claude_session=os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+        claude_session=claude_session,
         settle_seconds=float(os.environ.get("AGENT_BUS_SETTLE_SECONDS", SETTLE_SECONDS)),
+        transcript=Transcript(config_dir, claude_session) if claude_session else None,
+        confirm_seconds=float(os.environ.get("AGENT_BUS_CONFIRM_SECONDS", CONFIRM_SECONDS)),
     )
     app.claim()
     server = build_server(app)
@@ -428,9 +518,10 @@ async def serve(cfg: Config) -> None:
 
                 tg.start_soon(tap_in)
                 tg.start_soon(exit_on_signal, app)
-                if app.bus is not None and app.owns_channel:
+                if app.bus is not None and not app.background:
                     tg.start_soon(app.watch, write_stream, initialized)
-                    tg.start_soon(app.heartbeat, heartbeat_seconds)
+                    tg.start_soon(app.channel_loop, heartbeat_seconds)
+                    tg.start_soon(app.confirm_loop)
                 await server.run(in_recv, session_write, init)
                 tg.cancel_scope.cancel()
     finally:
