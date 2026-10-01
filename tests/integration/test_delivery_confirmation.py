@@ -158,6 +158,42 @@ def test_a_late_confirmation_settles_the_message_and_restores_the_session(
     assert session.receive() == second.id
 
 
+def _go_deaf(session: Session, bus_dir: Path) -> str:
+    msg = _alice(bus_dir).send("bob", "dropped while the dialog was open")
+    session.server.channel_events()  # pushed, never reaches the transcript
+    registry = Registry(Store(bus_dir))
+    assert _wait(lambda: registry.read("bob") is None)
+    return msg.id
+
+
+def _replayed(session: Session) -> dict[str, str]:
+    event = session.server.channel_events()
+    session.record(event["params"]["meta"]["msg_id"])
+    meta: dict[str, str] = event["params"]["meta"]
+    return meta
+
+
+def test_a_tool_call_revives_a_deaf_session_and_replays_what_it_lost(
+    open_session: Open, bus_dir: Path
+) -> None:
+    session = open_session("S1", confirm="1")
+    lost = _go_deaf(session, bus_dir)
+    session.server.call("inbox")
+    meta = _replayed(session)
+    assert (meta["msg_id"], meta["redelivery"]) == (lost, "true")
+    assert _wait(lambda: _delivered(bus_dir) == [lost])
+
+
+def test_a_human_turn_of_this_session_revives_it(open_session: Open, bus_dir: Path) -> None:
+    session = open_session("S1", confirm="1")
+    lost = _go_deaf(session, bus_dir)
+    Bus(Store(bus_dir), "bob", 50).record_human_turn("some-other-session")
+    assert session.no_push(1.5)
+    Bus(Store(bus_dir), "bob", 50).record_human_turn("S1")
+    meta = _replayed(session)
+    assert (meta["msg_id"], meta["redelivery"]) == (lost, "true")
+
+
 def test_without_a_transcript_file_a_push_counts_as_delivered(
     open_session: Open, bus_dir: Path
 ) -> None:

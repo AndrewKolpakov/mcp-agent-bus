@@ -54,7 +54,7 @@ from mcp.shared.message import SessionMessage
 from agent_bus import __version__
 from agent_bus.bus import Bus, BusError
 from agent_bus.config import SESSION_OPT_IN, Config
-from agent_bus.models import KINDS, MessageEvent, new_id
+from agent_bus.models import KINDS, HumanTurnEvent, MessageEvent, new_id
 from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME
 from agent_bus.registry import HEARTBEAT_SECONDS, Registry
 from agent_bus.state import BusState
@@ -215,6 +215,8 @@ class BusServer:
         self.late: set[str] = set()
         """Pushes whose deadline passed; still confirmed if they show up."""
         self.deaf = False
+        # Liveness looks only at events written after this server started.
+        self._liveness_offset = Store(cfg.bus_dir).size()
         self.store = Store(cfg.bus_dir)
         self.session = new_id()
         self.on_bus = cfg.on_bus and cfg.agent is not None
@@ -260,6 +262,8 @@ class BusServer:
     def call_tool(self, name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
         if self.bus is None:
             raise BusError(self.instructions())
+        # The model calling our tool proves the conversation is alive here.
+        self.revive("tool call")
         result: Any
         if name == "send":
             message = self.bus.send(
@@ -303,11 +307,42 @@ class BusServer:
             "pushed %s from %s redelivery=%s %s", message.id, message.sender, redelivery, state
         )
 
+    def revive(self, why: str) -> None:
+        """A sign of life ends deafness, and the pushes it lost become replayable.
+
+        A session goes deaf when a push never reaches its transcript, which
+        also happens to a live session that was briefly unable to receive
+        (the dev-channels dialog still open). Such a push never confirms
+        late, so only an independent sign of life can restore the session:
+        a tool call it makes, or a human turn recorded with its session id.
+        """
+        if not self.deaf:
+            return
+        self.deaf = False
+        lost, self.late = self.late, set()
+        log.info(
+            "session %s is alive (%s); will claim the channel and replay %s",
+            self.claude_session,
+            why,
+            ",".join(sorted(lost)) or "nothing",
+        )
+
+    def watch_liveness(self) -> None:
+        """Revive on a human turn the hooks recorded for this Claude session."""
+        result = self.store.read_from(self._liveness_offset)
+        self._liveness_offset = result.offset
+        if self.claude_session and any(
+            isinstance(e, HumanTurnEvent) and e.session == self.claude_session
+            for e in result.events
+        ):
+            self.revive("human turn")
+
     def confirm(self) -> None:
         """Settle pushes against the transcript; go deaf on an overdue one."""
         assert self.bus is not None
         if self.transcript is None:
             return
+        self.watch_liveness()
         seen = self.transcript.new_channel_ids()
         settled = seen & (set(self.pending) | self.late)
         if settled:
