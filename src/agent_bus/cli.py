@@ -63,6 +63,8 @@ def format_event(event: Event) -> str:
         return f"{stamp} {event.sender} -> {event.to} [{event.kind}] {event.id}{reply}\n    {body}"
     if event.type == "human_turn":
         return f"{stamp} human turn for {event.agent}"
+    if event.type == "session_ready":
+        return f"{stamp} session ready for {event.agent}"
     if event.type == "delivered":
         return f"{stamp} delivered {event.id} to {event.to}"
     return f"{stamp} ack {event.id} by {event.by}"

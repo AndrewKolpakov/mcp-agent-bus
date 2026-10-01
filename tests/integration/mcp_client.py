@@ -31,8 +31,10 @@ CLIENT_PROTOCOL = "2025-11-25"
 
 class ServerProcess:
     def __init__(self, bus_dir: Path, env: Mapping[str, str]) -> None:
+        # The test runner may itself be a Claude Code session (even a
+        # background job): its CLAUDE_* variables must not leak into the server.
         full_env = {
-            k: v for k, v in os.environ.items() if not k.startswith(("AGENT_BUS", "CLAUDE_PLUGIN"))
+            k: v for k, v in os.environ.items() if not k.startswith(("AGENT_BUS", "CLAUDE"))
         }
         full_env.update({"AGENT_BUS_DIR": str(bus_dir), **env})
         self.proc = subprocess.Popen(

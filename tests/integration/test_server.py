@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -191,3 +192,60 @@ def test_server_log_records_env_key_names_not_values(spawn: Spawn, bus_dir: Path
     text = (bus_dir / "server.log").read_text()
     assert "CLAUDE_PLUGIN_OPTION_SECRETISH" in text
     assert "do-not-log-me" not in text
+
+
+def test_pushes_wait_for_the_session_ready_event(spawn: Spawn, bus_dir: Path) -> None:
+    env = {**ON_BUS, "CLAUDE_CODE_SESSION_ID": "claude-1", "AGENT_BUS_READY_TIMEOUT": "30"}
+    server = spawn(env)
+    early = _alice(bus_dir).send("bob", "sent before the session is ready")
+    assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
+    assert not [e for e in Store(bus_dir).read_all().events if isinstance(e, DeliveredEvent)]
+    # Another session's readiness does not count.
+    Bus(Store(bus_dir), "bob", 4).record_session_ready("claude-other")
+    assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.0) == []
+    Bus(Store(bus_dir), "bob", 4).record_session_ready("claude-1")
+    event = server.channel_events()
+    assert event["params"]["meta"]["msg_id"] == early.id
+    assert event["params"]["meta"]["redelivery"] == "true"
+
+
+def test_pushes_start_after_the_ready_timeout_without_the_hook(spawn: Spawn, bus_dir: Path) -> None:
+    env = {**ON_BUS, "CLAUDE_CODE_SESSION_ID": "claude-1", "AGENT_BUS_READY_TIMEOUT": "1"}
+    server = spawn(env)
+    _alice(bus_dir).send("bob", "late but delivered")
+    assert server.channel_events(timeout=10)["params"]["content"] == "late but delivered"
+
+
+def test_a_background_session_never_takes_the_channel(spawn: Spawn, bus_dir: Path) -> None:
+    background = spawn({**ON_BUS, "CLAUDE_JOB_DIR": "/tmp/job"}, handshake=False)
+    init = background.handshake()["result"]
+    assert "background session" in init["instructions"]
+    tools = background.request("tools/list")["result"]["tools"]
+    assert sorted(t["name"] for t in tools) == ["ack", "inbox", "peers", "send"]
+    assert Registry(Store(bus_dir)).live() == {}
+    msg = _alice(bus_dir).send("bob", "for the interactive session")
+    assert (
+        background.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
+    )
+    assert not [e for e in Store(bus_dir).read_all().events if isinstance(e, DeliveredEvent)]
+    interactive = spawn()
+    assert interactive.channel_events()["params"]["meta"]["msg_id"] == msg.id
+
+
+def test_sigterm_releases_the_channel_and_logs_stop(spawn: Spawn, bus_dir: Path) -> None:
+    server = spawn()
+    registry = Registry(Store(bus_dir))
+    assert set(registry.live()) == {"bob"}
+    server.proc.send_signal(signal.SIGTERM)
+    assert server.proc.wait(timeout=10) == 0
+    assert registry.read("bob") is None
+    assert "signal=SIGTERM" in (bus_dir / "server.log").read_text()
+
+
+def test_the_discover_probe_does_not_flood_server_log(spawn: Spawn, bus_dir: Path) -> None:
+    server = spawn()
+    server.close_stdin()
+    server.proc.wait(timeout=10)
+    text = (bus_dir / "server.log").read_text()
+    assert "Failed to validate request" not in text
+    assert "validation error" not in text

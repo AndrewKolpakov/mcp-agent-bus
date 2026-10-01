@@ -4,9 +4,10 @@ A message's status is never updated in place. Delivery, acknowledgement and
 human activity are separate events, and every derived fact comes from
 replaying the log (see state.py). That keeps the log append-only.
 
-Two id spaces coexist and are never joined: `DeliveredEvent.session` is the
-server process's own id (the MCP server never sees Claude's session id),
-while `HumanTurnEvent.session` is Claude Code's session id from hook input.
+`DeliveredEvent.session` is the server process's own id. `HumanTurnEvent`
+and `SessionReadyEvent` carry Claude Code's session id from hook input,
+which the server also sees as CLAUDE_CODE_SESSION_ID and uses to match the
+readiness event to itself.
 """
 
 from __future__ import annotations
@@ -93,8 +94,21 @@ class HumanTurnEvent(_Event):
     session: str
 
 
+class SessionReadyEvent(_Event):
+    """Written by the SessionStart hook: the Claude session can take channel events.
+
+    Claude Code drops a channel event that arrives before the session is
+    ready (stage 5, check 3), so the server holds every push until it sees
+    this event for its own Claude session id.
+    """
+
+    type: Literal["session_ready"] = "session_ready"
+    agent: str
+    session: str
+
+
 Event = Annotated[
-    MessageEvent | DeliveredEvent | AckEvent | HumanTurnEvent,
+    MessageEvent | DeliveredEvent | AckEvent | HumanTurnEvent | SessionReadyEvent,
     Field(discriminator="type"),
 ]
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
