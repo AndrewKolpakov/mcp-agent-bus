@@ -113,6 +113,12 @@ class ServerProcess:
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return init
 
+    def connect(self) -> dict[str, Any]:
+        """Handshake plus the tools/list Claude Code sends right after it."""
+        init = self.handshake()
+        self.request("tools/list")
+        return init
+
     def call(self, tool: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
         response = self.request("tools/call", {"name": tool, "arguments": dict(arguments or {})})
         return response["result"]  # type: ignore[no-any-return]

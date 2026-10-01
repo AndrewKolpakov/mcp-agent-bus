@@ -9,7 +9,7 @@ import pytest
 
 from agent_bus import hooks
 from agent_bus.bus import Bus
-from agent_bus.models import HumanTurnEvent, SessionReadyEvent
+from agent_bus.models import HumanTurnEvent
 from agent_bus.names import CHANNEL_PROMPT_PREFIX, TOOL_PREFIX
 from agent_bus.store import Store
 
@@ -59,10 +59,9 @@ def test_session_start_names_the_agent_and_lists_unread(bus_dir: Path) -> None:
     assert f"{TOOL_PREFIX}ack" in text
 
 
-def test_session_start_marks_the_claude_session_ready(bus_dir: Path) -> None:
+def test_session_start_only_reports_and_writes_nothing(bus_dir: Path) -> None:
     _run("session-start", _env(bus_dir), {"session_id": "claude-7"})
-    ready = [e for e in Store(bus_dir).read_all().events if isinstance(e, SessionReadyEvent)]
-    assert [(r.agent, r.session) for r in ready] == [("bob", "claude-7")]
+    assert Store(bus_dir).read_all().events == []
 
 
 def test_session_start_without_an_agent_name_says_what_to_configure(bus_dir: Path) -> None:

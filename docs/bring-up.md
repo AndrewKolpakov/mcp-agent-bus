@@ -60,7 +60,6 @@ scripts/run.sh tail -f
 | `HH:MM:SS delivered <id> to ak` | Сервер сессии `ak` протолкнул его событием канала |
 | `HH:MM:SS ack <id> by ak` | Агент `ak` обработал сообщение |
 | `HH:MM:SS human turn for personal` | Человек ввёл промпт в сессии `personal` |
-| `HH:MM:SS session ready for ak` | Сессия `ak` стартовала, и её сервер начинает доставку |
 
 ## 4. Запуск сессий
 
@@ -89,7 +88,7 @@ AGENT_BUS_SESSION=1 CLAUDE_CONFIG_DIR=~/.claude-personal-a.k claude --model sonn
 ## 5. Что прочитать в `server.log`
 
 ```bash
-grep -E ' start | owns_channel=| ready| stop ' ~/.agent-bus/server.log | tail -12
+grep -E ' start | owns_channel=| delivery starts| stop ' ~/.agent-bus/server.log | tail -12
 ```
 
 - **`env_keys` содержит `AGENT_BUS_SESSION`.** Значит, блок `env` сервера в
@@ -100,8 +99,9 @@ grep -E ' start | owns_channel=| ready| stop ' ~/.agent-bus/server.log | tail -1
 - **`owns_channel=True` у каждого интерактивного агента.** `False` при
   `background=False` значит, что у агента уже есть другая живая сессия на
   шине, и события уходят туда. Фоновая сессия всегда `owns_channel=False`.
-- **`session <id> ready` после старта.** Это сигнал от хука `SessionStart`,
-  после которого сервер начинает доставку.
+- **`delivery starts for session <id>` через 5 секунд после старта.** С
+  этого момента сервер доставляет события. До него он ждёт, пока Claude Code
+  закончит подключение и запросит список инструментов.
 - **`stop pid=... signal=SIGTERM` при закрытии сессии.** Сервер освободил
   канал.
 
@@ -130,10 +130,9 @@ grep -E ' start | owns_channel=| ready| stop ' ~/.agent-bus/server.log | tail -1
 3. **Досылка после закрытия.** Закройте сессию `ak` командой `/exit`. В
    `personal` попросите отправить `ak` любое сообщение. В журнале появится
    сообщение без строки `delivered`. Запустите `ak` снова и пройдите диалог
-   флага разработки. Ожидается строка `session ready for ak`, сразу за ней
-   ровно одна строка `delivered`, и сессия `ak` сама, без вашего ввода,
-   отвечает на сообщение. Если `session ready` не появилась, сервер начнёт
-   доставку через 120 секунд после старта.
+   флага разработки. Примерно через 5 секунд после старта ожидается ровно
+   одна строка `delivered`, и сессия `ak` сама, без вашего ввода, отвечает
+   на сообщение.
 4. **Лимит ходов, по желанию.** Задайте одному аккаунту
    `"max_agent_turns": "2"` через `configure --values-stdin`, перезапустите
    сессию и попросите агентов обменяться сообщениями несколько раз. Третье

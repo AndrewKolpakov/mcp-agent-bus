@@ -108,10 +108,6 @@ def run(
             return 0
         bus = Bus(Store(cfg.bus_dir), cfg.agent, cfg.max_agent_turns)
         if event == "session-start":
-            # The server holds every channel push until it sees this event for
-            # its own Claude session id (see server.py).
-            if payload.get("session_id"):
-                bus.record_session_ready(str(payload["session_id"]))
             output: dict[str, Any] | None = session_start(bus)
         elif event == "user-prompt-submit":
             output = user_prompt_submit(bus, payload)

@@ -10,7 +10,6 @@ from agent_bus.models import (
     HumanTurnEvent,
     Kind,
     MessageEvent,
-    SessionReadyEvent,
     check_agent_name,
     new_id,
 )
@@ -111,9 +110,6 @@ class Bus:
 
     def record_human_turn(self, session: str) -> None:
         self.store.append(HumanTurnEvent(agent=self.me, session=session))
-
-    def record_session_ready(self, session: str) -> None:
-        self.store.append(SessionReadyEvent(agent=self.me, session=session))
 
     def peers(self) -> list[Peer]:
         state = self.state()

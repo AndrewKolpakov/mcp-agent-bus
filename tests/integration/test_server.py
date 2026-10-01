@@ -17,7 +17,12 @@ from agent_bus.store import Store
 
 from .mcp_client import DISCOVER_PROBE, ServerProcess, tool_json
 
-ON_BUS = {"AGENT_BUS_SESSION": "1", "AGENT_BUS_NAME": "bob", "AGENT_BUS_MAX_TURNS": "4"}
+ON_BUS = {
+    "AGENT_BUS_SESSION": "1",
+    "AGENT_BUS_NAME": "bob",
+    "AGENT_BUS_MAX_TURNS": "4",
+    "AGENT_BUS_SETTLE_SECONDS": "0",
+}
 
 Spawn = Callable[..., ServerProcess]
 
@@ -35,7 +40,7 @@ def spawn(bus_dir: Path) -> Iterator[Spawn]:
         server = ServerProcess(bus_dir, ON_BUS if env is None else env)
         started.append(server)
         if handshake:
-            server.handshake()
+            server.connect()
         return server
 
     yield _spawn
@@ -194,26 +199,29 @@ def test_server_log_records_env_key_names_not_values(spawn: Spawn, bus_dir: Path
     assert "do-not-log-me" not in text
 
 
-def test_pushes_wait_for_the_session_ready_event(spawn: Spawn, bus_dir: Path) -> None:
-    env = {**ON_BUS, "CLAUDE_CODE_SESSION_ID": "claude-1", "AGENT_BUS_READY_TIMEOUT": "30"}
-    server = spawn(env)
-    early = _alice(bus_dir).send("bob", "sent before the session is ready")
-    assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
+def _no_push(server: ServerProcess, seconds: float) -> bool:
+    return (
+        server.collect(lambda m: m.get("method") == "notifications/claude/channel", seconds) == []
+    )
+
+
+def test_nothing_is_pushed_before_claude_code_lists_the_tools(spawn: Spawn, bus_dir: Path) -> None:
+    queued = _alice(bus_dir).send("bob", "waiting since before the session started")
+    server = spawn(handshake=False)
+    server.handshake()
+    assert _no_push(server, 1.5)
     assert not [e for e in Store(bus_dir).read_all().events if isinstance(e, DeliveredEvent)]
-    # Another session's readiness does not count.
-    Bus(Store(bus_dir), "bob", 4).record_session_ready("claude-other")
-    assert server.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.0) == []
-    Bus(Store(bus_dir), "bob", 4).record_session_ready("claude-1")
+    server.request("tools/list")
     event = server.channel_events()
-    assert event["params"]["meta"]["msg_id"] == early.id
+    assert event["params"]["meta"]["msg_id"] == queued.id
     assert event["params"]["meta"]["redelivery"] == "true"
 
 
-def test_pushes_start_after_the_ready_timeout_without_the_hook(spawn: Spawn, bus_dir: Path) -> None:
-    env = {**ON_BUS, "CLAUDE_CODE_SESSION_ID": "claude-1", "AGENT_BUS_READY_TIMEOUT": "1"}
-    server = spawn(env)
-    _alice(bus_dir).send("bob", "late but delivered")
-    assert server.channel_events(timeout=10)["params"]["content"] == "late but delivered"
+def test_pushes_wait_the_settle_delay_after_the_tools_list(spawn: Spawn, bus_dir: Path) -> None:
+    queued = _alice(bus_dir).send("bob", "replayed after the settle delay")
+    server = spawn({**ON_BUS, "AGENT_BUS_SETTLE_SECONDS": "2"})
+    assert _no_push(server, 1.0)
+    assert server.channel_events(timeout=10)["params"]["meta"]["msg_id"] == queued.id
 
 
 def test_a_background_session_never_takes_the_channel(spawn: Spawn, bus_dir: Path) -> None:

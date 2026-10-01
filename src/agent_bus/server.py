@@ -9,14 +9,18 @@ session that has the plugin enabled still gets a live server, so `/mcp` does
 not report it as failed, but that server lists no tools and pushes nothing.
 
 Claude Code silently drops a channel event in two cases (stage 5 live
-runs): one that arrives before the session is ready, and any event in a
-background (`--bg`) session. A dropped push still writes `delivered`, and a
-delivered message is never replayed, so the server avoids both cases:
+runs): one sent while the server's connection is still being set up, and
+any event in a background (`--bg`) session. A dropped push still writes
+`delivered`, and a delivered message is never replayed, so the server
+avoids both cases:
 
 - A background session (CLAUDE_JOB_DIR set) never takes the channel.
-- An interactive session pushes nothing until the SessionStart hook has
-  written `session_ready` for its Claude session id, or until
-  READY_TIMEOUT passes.
+- An interactive session pushes nothing until Claude Code has listed its
+  tools, the last step of connecting that the server can see, and then
+  SETTLE_SECONDS more. No signal says the channel listener is registered;
+  pushes sent at connect were lost, pushes sent tens of seconds later
+  always arrived. The SessionStart hook is no signal: it fires before the
+  server even starts.
 
 Delivery then starts by pushing every message to this agent that has no
 `delivered` event, and follows the log from the offset of that same read.
@@ -43,7 +47,7 @@ from mcp.shared.message import SessionMessage
 from agent_bus import __version__
 from agent_bus.bus import Bus, BusError
 from agent_bus.config import SESSION_OPT_IN, Config
-from agent_bus.models import KINDS, MessageEvent, SessionReadyEvent, new_id
+from agent_bus.models import KINDS, MessageEvent, new_id
 from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME
 from agent_bus.registry import HEARTBEAT_SECONDS, Registry
 from agent_bus.state import BusState
@@ -54,7 +58,8 @@ log = logging.getLogger(__name__)
 CHANNEL_CAPABILITY = "claude/channel"
 CHANNEL_METHOD = "notifications/claude/channel"
 POLL_SECONDS = 0.3
-READY_TIMEOUT_SECONDS = 120.0
+SETTLE_SECONDS = 5.0
+TOOLS_LIST_TIMEOUT_SECONDS = 60.0
 DISCOVER_PROBE_LOG = "Failed to validate request"
 
 INSTRUCTIONS_ON_BUS = """\
@@ -182,12 +187,13 @@ class BusServer:
         *,
         background: bool = False,
         claude_session: str | None = None,
-        ready_timeout: float = READY_TIMEOUT_SECONDS,
+        settle_seconds: float = SETTLE_SECONDS,
     ) -> None:
         self.cfg = cfg
         self.background = background
         self.claude_session = claude_session
-        self.ready_timeout = ready_timeout
+        self.settle_seconds = settle_seconds
+        self.tools_listed = anyio.Event()
         self.store = Store(cfg.bus_dir)
         self.session = new_id()
         self.on_bus = cfg.on_bus and cfg.agent is not None
@@ -269,30 +275,14 @@ class BusServer:
         self.bus.mark_delivered(message.id, self.session)
         log.info("pushed %s from %s redelivery=%s", message.id, message.sender, redelivery)
 
-    async def wait_ready(self) -> None:
-        """Hold pushes until the SessionStart hook marks this session ready."""
-        assert self.bus is not None
-        if self.claude_session is None:
-            return
-        me, offset = self.bus.me, 0
-        with anyio.move_on_after(self.ready_timeout):
-            while True:
-                result = self.store.read_from(offset)
-                offset = result.offset
-                for event in result.events:
-                    if (
-                        isinstance(event, SessionReadyEvent)
-                        and event.agent == me
-                        and event.session == self.claude_session
-                    ):
-                        log.info("session %s ready", self.claude_session)
-                        return
-                await anyio.sleep(POLL_SECONDS)
-        log.warning(
-            "no session_ready for %s after %ss; pushing anyway",
-            self.claude_session,
-            self.ready_timeout,
-        )
+    async def wait_connected(self) -> None:
+        """Hold pushes until the connection is set up, then SETTLE_SECONDS more."""
+        with anyio.move_on_after(TOOLS_LIST_TIMEOUT_SECONDS):
+            await self.tools_listed.wait()
+        if not self.tools_listed.is_set():
+            log.warning("no tools/list within %ss; pushing anyway", TOOLS_LIST_TIMEOUT_SECONDS)
+        await anyio.sleep(self.settle_seconds)
+        log.info("delivery starts for session %s", self.claude_session)
 
     async def watch(
         self, write: MemoryObjectSendStream[SessionMessage], initialized: anyio.Event
@@ -300,7 +290,7 @@ class BusServer:
         assert self.bus is not None
         me = self.bus.me
         await initialized.wait()
-        await self.wait_ready()
+        await self.wait_connected()
         snapshot = self.store.read_all()
         offset = snapshot.offset
         for message in BusState.from_events(snapshot.events).undelivered(me):
@@ -333,6 +323,7 @@ def build_server(app: BusServer) -> Server[Any, Any]:
 
     @server.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
     async def _list_tools() -> list[types.Tool]:
+        app.tools_listed.set()
         return app.list_tools()
 
     @server.call_tool()  # type: ignore[untyped-decorator]
@@ -410,7 +401,7 @@ async def serve(cfg: Config) -> None:
         cfg,
         background=bool(os.environ.get("CLAUDE_JOB_DIR")),
         claude_session=os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
-        ready_timeout=float(os.environ.get("AGENT_BUS_READY_TIMEOUT", READY_TIMEOUT_SECONDS)),
+        settle_seconds=float(os.environ.get("AGENT_BUS_SETTLE_SECONDS", SETTLE_SECONDS)),
     )
     app.claim()
     server = build_server(app)
