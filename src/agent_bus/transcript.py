@@ -2,32 +2,68 @@
 
 Claude Code accepts a channel notification without acknowledging it and
 drops it silently when the session cannot take it: while the connection is
-still being set up, in a background fork that lost the channels flag, or in
-a foreground process whose conversation moved to the background (stage 5
-live runs). The one trace a delivered event leaves is a record in the
-session transcript: a `user` record with `origin.kind == "channel"` whose
-content is the `<channel ...>` tag carrying the msg_id.
+still being set up, in a background fork started without the channels
+flag, and in a foreground process whose conversation moved to the
+background (stage 5 live runs). The transcript is the only trace.
 
-The transcript format is internal to Claude Code. The file is found by
-session id under `$CLAUDE_CONFIG_DIR/projects/*/`, without deriving the
-project directory name, and a missing file means "cannot confirm", which the
-server treats as the old behaviour rather than as a deaf session.
+An event enters the session's input queue and is taken out of it when the
+conversation consumes it. What the transcript shows (Claude Code 2.1.286,
+counted over every local transcript):
+
+- `queue-operation` `enqueue`, with the `<channel ...>` tag as `content`.
+  A process whose conversation moved to the background still writes this
+  and nothing after it, so an enqueue alone confirms nothing.
+- `queue-operation` `dequeue`, without content: the oldest queued item
+  starts a turn (an idle session).
+- `queue-operation` `remove` with content and `reason` `absorbed_mid_turn`
+  or `delivered_to_agent`: a busy session took the item into its turn; an
+  `attachment` of type `queued_command` carries the same tag.
+- `queue-operation` `popAll`: the queue was emptied without a turn.
+- A `user` record with `origin.kind == "channel"` and the tag as content.
+
+A msg_id is confirmed by a dequeue of its queue entry, a delivering remove,
+a `queued_command` attachment, or a channel `user` record. The format is
+internal to Claude Code; the file is found by session id under
+`$CLAUDE_CONFIG_DIR/projects/*/`.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from pathlib import Path
+from typing import Any
 
 from agent_bus.names import CHANNEL_SOURCE
 
 MSG_ID = re.compile(r'msg_id="([0-9A-HJKMNP-TV-Z]{26})"')
+DELIVERING_REMOVALS = frozenset({"absorbed_mid_turn", "delivered_to_agent"})
+
+
+def _text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(str(p.get("text", "")) for p in value if isinstance(p, dict))
+    return ""
+
+
+def bus_ids(text: str) -> set[str]:
+    """msg_ids in the `<channel>` tags of this bus within some text."""
+    if f'source="{CHANNEL_SOURCE}"' not in text:
+        return set()
+    return set(MSG_ID.findall(text))
 
 
 def channel_ids(record: object) -> set[str]:
-    """msg_ids of this bus's channel events in one transcript record."""
+    """msg_ids a single record shows as consumed by the conversation."""
     if not isinstance(record, dict):
+        return set()
+    if record.get("type") == "attachment":
+        attachment = record.get("attachment")
+        if isinstance(attachment, dict) and attachment.get("type") == "queued_command":
+            return bus_ids(_text(attachment.get("prompt")))
         return set()
     origin = record.get("origin")
     if not isinstance(origin, dict) or origin.get("kind") != "channel":
@@ -35,12 +71,7 @@ def channel_ids(record: object) -> set[str]:
     if origin.get("server") not in (None, CHANNEL_SOURCE):
         return set()
     message = record.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, list):
-        content = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-    if not isinstance(content, str) or f'source="{CHANNEL_SOURCE}"' not in content:
-        return set()
-    return set(MSG_ID.findall(content))
+    return bus_ids(_text(message.get("content") if isinstance(message, dict) else None))
 
 
 class Transcript:
@@ -49,6 +80,8 @@ class Transcript:
         self.session = session
         self._path: Path | None = None
         self._offset = 0
+        self._queue: deque[set[str]] = deque()
+        """msg_ids of each queued item, oldest first (empty for non-bus items)."""
 
     def path(self) -> Path | None:
         if self._path is None:
@@ -56,8 +89,32 @@ class Transcript:
             self._path = matches[0] if matches else None
         return self._path
 
+    def layout_known(self) -> bool:
+        """Whether any session transcript exists where this one is looked for."""
+        return next((self.config_dir / "projects").glob("*/*.jsonl"), None) is not None
+
+    def _apply(self, record: dict[str, Any]) -> set[str]:
+        if record.get("type") != "queue-operation":
+            return channel_ids(record)
+        operation = record.get("operation")
+        ids = bus_ids(_text(record.get("content")))
+        if operation == "enqueue":
+            self._queue.append(ids)
+        elif operation == "dequeue":
+            return self._queue.popleft() if self._queue else set()
+        elif operation == "remove":
+            for index, queued in enumerate(self._queue):
+                if queued == ids:
+                    del self._queue[index]
+                    break
+            if record.get("reason") in DELIVERING_REMOVALS:
+                return ids
+        elif operation == "popAll":
+            self._queue.clear()
+        return set()
+
     def new_channel_ids(self) -> set[str]:
-        """msg_ids of channel events written since the previous call."""
+        """msg_ids the conversation consumed since the previous call."""
         path = self.path()
         if path is None:
             return set()
@@ -73,10 +130,16 @@ class Transcript:
         self._offset += len(complete) + 1
         found: set[str] = set()
         for raw in complete.split(b"\n"):
-            if b'"channel"' not in raw:
+            if (
+                b"queue-operation" not in raw
+                and b'"channel"' not in raw
+                and b"queued_command" not in raw
+            ):
                 continue
             try:
-                found |= channel_ids(json.loads(raw))
+                record = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                found |= self._apply(record)
         return found

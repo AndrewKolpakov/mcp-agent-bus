@@ -297,12 +297,14 @@ class BusServer:
     ) -> None:
         assert self.bus is not None
         await write.send(channel_notification(message, redelivery=redelivery))
-        if self.transcript is not None and self.transcript.path() is not None:
+        # A fresh session creates its transcript with its first turn, which may
+        # be this very event, so a missing file is waited for, not assumed.
+        if self.transcript is not None:
             self.pending[message.id] = time.monotonic() + self.confirm_seconds
             state = "awaiting transcript"
         else:
             self.bus.mark_delivered(message.id, self.session)
-            state = "delivered unconfirmed (no transcript)"
+            state = "delivered unconfirmed (no session id)"
         log.info(
             "pushed %s from %s redelivery=%s %s", message.id, message.sender, redelivery, state
         )
@@ -358,6 +360,18 @@ class BusServer:
                 log.info("session %s receives again; may claim the channel", self.claude_session)
         now = time.monotonic()
         overdue = [msg_id for msg_id, deadline in self.pending.items() if deadline <= now]
+        if overdue and self.transcript.path() is None and not self.transcript.layout_known():
+            # No transcript anywhere it is looked for: the layout is not the
+            # one this code knows, so confirmation is impossible, not failed.
+            for msg_id in overdue:
+                del self.pending[msg_id]
+                self.bus.mark_delivered(msg_id, self.session)
+            log.warning(
+                "no transcripts under %s; counted %s as delivered unconfirmed",
+                self.transcript.config_dir / "projects",
+                ",".join(overdue),
+            )
+            overdue = []
         if overdue:
             for msg_id in overdue:
                 del self.pending[msg_id]

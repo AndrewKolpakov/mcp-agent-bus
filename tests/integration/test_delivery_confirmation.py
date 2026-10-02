@@ -51,6 +51,16 @@ class Session:
         with self.transcript.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
 
+    def queue(self, operation: str, msg_id: str | None = None, reason: str | None = None) -> None:
+        """Write a queue-operation record the way Claude Code 2.1.286 does."""
+        record: dict[str, object] = {"type": "queue-operation", "operation": operation}
+        if msg_id is not None:
+            record["content"] = f'<channel source="{CHANNEL_SOURCE}" msg_id="{msg_id}">x</channel>'
+        if reason is not None:
+            record["reason"] = reason
+        with self.transcript.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
     def no_push(self, seconds: float) -> bool:
         return self.server.collect(lambda m: m.get("method") == CHANNEL, seconds) == []
 
@@ -194,12 +204,45 @@ def test_a_human_turn_of_this_session_revives_it(open_session: Open, bus_dir: Pa
     assert (meta["msg_id"], meta["redelivery"]) == (lost, "true")
 
 
-def test_without_a_transcript_file_a_push_counts_as_delivered(
+def test_with_no_transcripts_at_all_an_overdue_push_counts_as_delivered(
     open_session: Open, bus_dir: Path
 ) -> None:
-    session = open_session("S-no-file", transcript=False)
-    msg = _alice(bus_dir).send("bob", "old behaviour")
+    session = open_session("S-no-file", transcript=False, confirm="1")
+    msg = _alice(bus_dir).send("bob", "unknown layout")
     session.server.channel_events()
+    time.sleep(0.5)
+    assert _delivered(bus_dir) == []
+    assert _wait(lambda: _delivered(bus_dir) == [msg.id])
+    assert Registry(Store(bus_dir)).read("bob") is not None
+
+
+def test_a_fresh_session_whose_transcript_appears_with_the_event_is_confirmed(
+    open_session: Open, bus_dir: Path
+) -> None:
+    session = open_session("S-fresh", transcript=False)
+    msg = _alice(bus_dir).send("bob", "first turn of a fresh session")
+    session.server.channel_events()
+    session.queue("enqueue", msg.id)
+    session.queue("dequeue")
+    assert _wait(lambda: _delivered(bus_dir) == [msg.id])
+
+
+def test_an_enqueue_without_a_dequeue_does_not_confirm(open_session: Open, bus_dir: Path) -> None:
+    # What a foreground process whose conversation moved to the background writes.
+    session = open_session("S-forked-away", confirm="1")
+    msg = _alice(bus_dir).send("bob", "queued in a process nobody talks to")
+    session.server.channel_events()
+    session.queue("enqueue", msg.id)
+    assert _wait(lambda: Registry(Store(bus_dir)).read("bob") is None)
+    assert _delivered(bus_dir) == []
+
+
+def test_a_message_absorbed_mid_turn_is_confirmed(open_session: Open, bus_dir: Path) -> None:
+    session = open_session("S-busy")
+    msg = _alice(bus_dir).send("bob", "arrives while the model is busy")
+    session.server.channel_events()
+    session.queue("enqueue", msg.id)
+    session.queue("remove", msg.id, reason="absorbed_mid_turn")
     assert _wait(lambda: _delivered(bus_dir) == [msg.id])
 
 
