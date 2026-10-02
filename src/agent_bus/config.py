@@ -15,7 +15,7 @@ from pathlib import Path
 from agent_bus.models import check_agent_name
 
 DEFAULT_BUS_DIR = "~/.agent-bus"
-DEFAULT_MAX_AGENT_TURNS = 6
+DEFAULT_MAX_AGENT_TURNS = 600
 SESSION_OPT_IN = "AGENT_BUS_SESSION"
 
 

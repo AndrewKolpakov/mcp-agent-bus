@@ -30,9 +30,9 @@ for dir in ~/.claude-personal ~/.claude-personal-a.k; do
     CLAUDE_CONFIG_DIR=$dir claude plugin install agent-bus@agent-bus-dev
 done
 
-echo '{"agent_name": "personal", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "6"}' \
+echo '{"agent_name": "personal", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "600"}' \
     | CLAUDE_CONFIG_DIR=~/.claude-personal claude plugin configure agent-bus@agent-bus-dev --values-stdin
-echo '{"agent_name": "ak", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "6"}' \
+echo '{"agent_name": "ak", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "600"}' \
     | CLAUDE_CONFIG_DIR=~/.claude-personal-a.k claude plugin configure agent-bus@agent-bus-dev --values-stdin
 ```
 

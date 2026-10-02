@@ -48,6 +48,11 @@ def test_server_env_maps_every_user_config_option() -> None:
         "AGENT_BUS_MAX_TURNS": "${user_config.max_agent_turns}",
     }
     assert set(manifest["userConfig"]) == {"agent_name", "bus_dir", "max_agent_turns"}
+    from agent_bus.config import DEFAULT_MAX_AGENT_TURNS
+
+    turns = manifest["userConfig"]["max_agent_turns"]
+    assert turns["default"] == DEFAULT_MAX_AGENT_TURNS
+    assert turns["min"] <= turns["default"] <= turns["max"]
 
 
 def test_marketplace_serves_this_directory_as_the_plugin() -> None:
