@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
+from agent_bus.config import DEFAULT_RATE_LIMIT, DEFAULT_RATE_WINDOW_SECONDS
 from agent_bus.models import (
     AckEvent,
     DeliveredEvent,
@@ -12,6 +14,7 @@ from agent_bus.models import (
     MessageEvent,
     check_agent_name,
     new_id,
+    now,
 )
 from agent_bus.registry import Registry
 from agent_bus.state import BusState
@@ -24,8 +27,19 @@ class BusError(ValueError):
     """A request the bus refuses; the message is safe to show to the model."""
 
 
-class TurnLimitError(BusError):
+class RateLimitError(BusError):
     pass
+
+
+# Ping-pong is agents answering answers ("done" -> "thanks" -> "you're welcome").
+# A result or an await_human ends its chain: it can be acked, and a result can
+# be followed by a new task, but never answered with more talk. The rate limit
+# is the backstop for loops this rule does not foresee; real work peaked at 10
+# messages per 5 minutes in the stage-5 history, so 30 leaves 3x headroom.
+ALLOWED_REPLIES: dict[Kind, frozenset[Kind]] = {
+    "result": frozenset({"task"}),
+    "await_human": frozenset(),
+}
 
 
 @dataclass(frozen=True)
@@ -36,10 +50,18 @@ class Peer:
 
 
 class Bus:
-    def __init__(self, store: Store, me: str, max_agent_turns: int) -> None:
+    def __init__(
+        self,
+        store: Store,
+        me: str,
+        *,
+        rate_limit: int = DEFAULT_RATE_LIMIT,
+        rate_window: float = DEFAULT_RATE_WINDOW_SECONDS,
+    ) -> None:
         self.store = store
         self.me = check_agent_name(me)
-        self.max_agent_turns = max_agent_turns
+        self.rate_limit = rate_limit
+        self.rate_window = rate_window
 
     def state(self) -> BusState:
         return BusState.from_events(self.store.read_all().events)
@@ -69,14 +91,26 @@ class Bus:
         else:
             thread = msg_id
 
-        # await_human is how an agent at the limit hands control back to the
-        # humans, so it is never refused.
+        if original is not None and original.kind in ALLOWED_REPLIES:
+            allowed = ALLOWED_REPLIES[original.kind]
+            if kind not in allowed:
+                hint = "; start the next step with kind='task'" if allowed else ""
+                raise BusError(
+                    f"message {original.id} is kind={original.kind!r}, which ends its chain: "
+                    f"do not answer it, ack it instead{hint}"
+                )
+
+        # await_human is how agents hand control back to the humans, so the
+        # rate limit never refuses it.
         if kind != "await_human":
-            turns = state.agent_turns_since_human(self.me, to)
-            if turns >= self.max_agent_turns:
-                raise TurnLimitError(
-                    f"{turns} messages between {self.me} and {to} since a human last spoke "
-                    f"(limit {self.max_agent_turns}); send kind='await_human' and wait for a human"
+            recent = state.messages_between(
+                self.me, to, since=now() - timedelta(seconds=self.rate_window)
+            )
+            if recent >= self.rate_limit:
+                raise RateLimitError(
+                    f"{recent} messages between {self.me} and {to} in the last "
+                    f"{self.rate_window:g}s (limit {self.rate_limit}); this looks like a loop. "
+                    "Send one message with kind='await_human' and wait for a human"
                 )
 
         message = MessageEvent(

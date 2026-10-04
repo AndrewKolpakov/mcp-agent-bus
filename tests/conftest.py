@@ -15,9 +15,9 @@ def store(tmp_path: Path) -> Store:
 
 @pytest.fixture
 def alice(store: Store) -> Bus:
-    return Bus(store, "alice", max_agent_turns=4)
+    return Bus(store, "alice", rate_limit=4)
 
 
 @pytest.fixture
 def bob(store: Store) -> Bus:
-    return Bus(store, "bob", max_agent_turns=4)
+    return Bus(store, "bob", rate_limit=4)

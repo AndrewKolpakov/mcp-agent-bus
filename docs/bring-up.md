@@ -30,9 +30,9 @@ for dir in ~/.claude-personal ~/.claude-personal-a.k; do
     CLAUDE_CONFIG_DIR=$dir claude plugin install agent-bus@agent-bus-dev
 done
 
-echo '{"agent_name": "personal", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "600"}' \
+echo '{"agent_name": "personal", "bus_dir": "'"$HOME"'/.agent-bus", "rate_limit": "30", "rate_window_seconds": "300"}' \
     | CLAUDE_CONFIG_DIR=~/.claude-personal claude plugin configure agent-bus@agent-bus-dev --values-stdin
-echo '{"agent_name": "ak", "bus_dir": "'"$HOME"'/.agent-bus", "max_agent_turns": "600"}' \
+echo '{"agent_name": "ak", "bus_dir": "'"$HOME"'/.agent-bus", "rate_limit": "30", "rate_window_seconds": "300"}' \
     | CLAUDE_CONFIG_DIR=~/.claude-personal-a.k claude plugin configure agent-bus@agent-bus-dev --values-stdin
 ```
 
@@ -145,11 +145,13 @@ grep -E ' start | owns_channel=| delivery starts| stop ' ~/.agent-bus/server.log
    флага разработки. Примерно через 5 секунд после старта ожидается ровно
    одна строка `delivered`, и сессия `ak` сама, без вашего ввода, отвечает
    на сообщение.
-4. **Лимит ходов, по желанию.** Задайте одному аккаунту
-   `"max_agent_turns": "2"` через `configure --values-stdin`, перезапустите
-   сессию и попросите агентов обменяться сообщениями несколько раз. Третье
-   сообщение будет отклонено, агент отправит `kind="await_human"` и
-   остановится.
+4. **Защита от зацикливания, по желанию.** Попросите `personal` поручить
+   `ak` задачу, а после результата поблагодарить его ответом на этот
+   результат. Шина отклонит благодарность с подсказкой подтвердить
+   результат через `ack`. Чтобы проверить ограничение скорости, задайте
+   одному аккаунту `"rate_limit": "3"` через `configure --values-stdin` и
+   перезапустите сессию: четвёртое сообщение за 5 минут будет отклонено, и
+   агент отправит `kind="await_human"`.
 5. **Фоновая сессия.** Фоновая сессия не получает событий канала, поэтому
    канал не захватывает. Запустите `ak` с `--bg`, пока интерактивная `ak`
    закрыта. В `server.log` у фонового сервера ожидается `background=True

@@ -14,8 +14,10 @@ from pathlib import Path
 
 from agent_bus.models import check_agent_name
 
+DEFAULT_RATE_LIMIT = 30
+DEFAULT_RATE_WINDOW_SECONDS = 300.0
+
 DEFAULT_BUS_DIR = "~/.agent-bus"
-DEFAULT_MAX_AGENT_TURNS = 600
 SESSION_OPT_IN = "AGENT_BUS_SESSION"
 
 
@@ -23,7 +25,8 @@ SESSION_OPT_IN = "AGENT_BUS_SESSION"
 class Config:
     bus_dir: Path
     agent: str | None
-    max_agent_turns: int
+    rate_limit: int
+    rate_window: float
     on_bus: bool
     """True only for a session launched with AGENT_BUS_SESSION=1."""
 
@@ -52,15 +55,18 @@ def load(
     env = os.environ if env is None else env
     raw_dir = bus_dir or _pick(env, "AGENT_BUS_DIR", "CLAUDE_PLUGIN_OPTION_BUS_DIR")
     raw_agent = agent or _pick(env, "AGENT_BUS_NAME", "CLAUDE_PLUGIN_OPTION_AGENT_NAME")
-    raw_turns = _pick(env, "AGENT_BUS_MAX_TURNS", "CLAUDE_PLUGIN_OPTION_MAX_AGENT_TURNS")
-    turns = DEFAULT_MAX_AGENT_TURNS
-    if raw_turns is not None:
-        turns = int(float(raw_turns))
-        if turns < 1:
-            raise ValueError(f"max agent turns must be at least 1, got {raw_turns!r}")
+    raw_limit = _pick(env, "AGENT_BUS_RATE_LIMIT", "CLAUDE_PLUGIN_OPTION_RATE_LIMIT")
+    raw_window = _pick(env, "AGENT_BUS_RATE_WINDOW", "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS")
+    limit = DEFAULT_RATE_LIMIT if raw_limit is None else int(float(raw_limit))
+    window = DEFAULT_RATE_WINDOW_SECONDS if raw_window is None else float(raw_window)
+    if limit < 1:
+        raise ValueError(f"rate limit must be at least 1 message, got {raw_limit!r}")
+    if window <= 0:
+        raise ValueError(f"rate window must be positive, got {raw_window!r}")
     return Config(
         bus_dir=Path(raw_dir or DEFAULT_BUS_DIR).expanduser(),
         agent=check_agent_name(raw_agent) if raw_agent else None,
-        max_agent_turns=turns,
+        rate_limit=limit,
+        rate_window=window,
         on_bus=env.get(SESSION_OPT_IN, "").strip() == "1",
     )

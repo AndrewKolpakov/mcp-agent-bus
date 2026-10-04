@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from agent_bus.models import AckEvent, DeliveredEvent, Event, HumanTurnEvent, MessageEvent
 
@@ -57,16 +58,13 @@ class BusState:
         names = {m.sender for m in self.messages.values()} | {m.to for m in self.messages.values()}
         return names | set(self.last_human_turn)
 
-    def agent_turns_since_human(self, a: str, b: str) -> int:
-        """Messages between `a` and `b`, either way, after either one's latest human turn.
+    def messages_between(self, a: str, b: str, *, since: datetime) -> int:
+        """Messages between `a` and `b`, either way, written at or after `since`.
 
-        Counted per pair rather than per thread: otherwise two agents could
-        dodge the limit by opening a fresh thread for every message.
+        Counted per pair rather than per thread, so opening a fresh thread for
+        every message does not dodge the rate limit. Timestamps are compared
+        here, unlike ordering: every writer runs on this one machine, and a
+        window of minutes tolerates any clock skew between its processes.
         """
         pair = {a, b}
-        floor = max(self.last_human_turn.get(a, -1), self.last_human_turn.get(b, -1))
-        return sum(
-            1
-            for m in self.messages.values()
-            if {m.sender, m.to} == pair and self.position[m.id] > floor
-        )
+        return sum(1 for m in self.messages.values() if {m.sender, m.to} == pair and m.ts >= since)

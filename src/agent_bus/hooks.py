@@ -4,7 +4,8 @@ Hooks run in their own processes, independent of the MCP server, and reach
 the bus through the same Store, so every write is serialized with the
 server's. They are a safety net under the channel: SessionStart reports what
 is waiting, Stop reminds the model of messages it has not handled, and
-UserPromptSubmit records human activity for the ping-pong limit.
+UserPromptSubmit records human activity, which revives a session the server
+thought deaf.
 
 A hook never fails the session: any error is reported on stderr and the
 hook exits 0, so the bus can only ever add context, never block a turn.
@@ -106,7 +107,9 @@ def run(
                 )
                 json.dump(_context("SessionStart", text), sink)
             return 0
-        bus = Bus(Store(cfg.bus_dir), cfg.agent, cfg.max_agent_turns)
+        bus = Bus(
+            Store(cfg.bus_dir), cfg.agent, rate_limit=cfg.rate_limit, rate_window=cfg.rate_window
+        )
         if event == "session-start":
             output: dict[str, Any] | None = session_start(bus)
         elif event == "user-prompt-submit":

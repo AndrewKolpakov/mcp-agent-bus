@@ -93,8 +93,12 @@ anything else. A result usually needs no reply: use it, then ack it right away.
 it with another message; just ack it.
 - redelivery="true" means the message arrived while this session was closed.
 
-If send is refused because of the turn limit, send one message with \
-kind="await_human", then stop and let your user decide how to continue."""
+A result or an await_human ends its chain: never answer it with another message. \
+Ack it, and if more work is needed, start it with a new kind="task". The bus refuses \
+replies to results that are not tasks.
+
+If send is refused by the loop guard (too many messages in a short time), send one \
+message with kind="await_human", then stop and let your user decide how to continue."""
 
 SECOND_SESSION_NOTE = """
 
@@ -221,7 +225,9 @@ class BusServer:
         self.session = new_id()
         self.on_bus = cfg.on_bus and cfg.agent is not None
         self.bus = (
-            Bus(self.store, cfg.agent, cfg.max_agent_turns) if self.on_bus and cfg.agent else None
+            Bus(self.store, cfg.agent, rate_limit=cfg.rate_limit, rate_window=cfg.rate_window)
+            if self.on_bus and cfg.agent
+            else None
         )
         self.registry = Registry(self.store)
         self.owns_channel = False

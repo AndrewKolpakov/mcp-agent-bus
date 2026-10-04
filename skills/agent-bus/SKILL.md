@@ -66,15 +66,23 @@ A background (`--bg`) session receives no channel events. There the hooks
 list waiting messages at session start and at the end of each turn; read
 them with `inbox`.
 
-## The turn limit
+## Ending a chain
 
-Two agents may exchange a limited number of messages before a human has to
-speak again. When `send` refuses with a turn-limit error:
+A `result` or an `await_human` ends its chain. Never answer one with
+thanks, confirmation or other talk: ack it. If more work is needed after a
+result, send a new message with `kind="task"`. The bus refuses any other
+reply to a result, and every reply to an `await_human`.
+
+## The loop guard
+
+Two agents may exchange only so many messages within a few minutes. Real
+work is slower than that; a burst means the agents are looping. When `send`
+refuses with a loop-guard error:
 
 1. Send one message with `kind="await_human"` that says where things stand.
 2. Stop and tell your user what you need from them.
 
-Do not work around the limit with new threads or other agents.
+Do not work around the guard with new threads or other agents.
 
 ## Sending on your user's behalf
 

@@ -11,7 +11,10 @@ def test_defaults() -> None:
     cfg = config.load({})
     assert cfg.bus_dir == Path("~/.agent-bus").expanduser()
     assert cfg.agent is None
-    assert cfg.max_agent_turns == config.DEFAULT_MAX_AGENT_TURNS
+    assert (cfg.rate_limit, cfg.rate_window) == (
+        config.DEFAULT_RATE_LIMIT,
+        config.DEFAULT_RATE_WINDOW_SECONDS,
+    )
     assert cfg.on_bus is False
 
 
@@ -30,12 +33,13 @@ def test_plugin_options_expand_home_and_parse_numbers() -> None:
     env = {
         "CLAUDE_PLUGIN_OPTION_BUS_DIR": "~/bus",
         "CLAUDE_PLUGIN_OPTION_AGENT_NAME": "bob",
-        "CLAUDE_PLUGIN_OPTION_MAX_AGENT_TURNS": "8.0",
+        "CLAUDE_PLUGIN_OPTION_RATE_LIMIT": "8.0",
+        "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS": "60",
     }
     cfg = config.load(env)
     assert cfg.bus_dir == Path("~/bus").expanduser()
     assert cfg.agent == "bob"
-    assert cfg.max_agent_turns == 8
+    assert (cfg.rate_limit, cfg.rate_window) == (8, 60.0)
 
 
 def test_empty_and_unsubstituted_values_count_as_unset() -> None:
@@ -59,6 +63,8 @@ def test_bad_values_are_rejected() -> None:
     with pytest.raises(ValueError, match="invalid agent name"):
         config.load({"AGENT_BUS_NAME": "Bad Name"})
     with pytest.raises(ValueError, match="at least 1"):
-        config.load({"AGENT_BUS_MAX_TURNS": "0"})
+        config.load({"AGENT_BUS_RATE_LIMIT": "0"})
+    with pytest.raises(ValueError, match="positive"):
+        config.load({"AGENT_BUS_RATE_WINDOW": "0"})
     with pytest.raises(ValueError, match="not set"):
         config.load({}).require_agent()

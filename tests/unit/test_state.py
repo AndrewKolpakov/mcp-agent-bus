@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from agent_bus.models import AckEvent, DeliveredEvent, Event, HumanTurnEvent, MessageEvent
+from datetime import timedelta
+
+from agent_bus.models import (
+    AckEvent,
+    DeliveredEvent,
+    Event,
+    HumanTurnEvent,
+    MessageEvent,
+    now,
+)
 from agent_bus.state import BusState
 
 
@@ -34,28 +43,24 @@ def test_order_is_log_position_not_timestamp() -> None:
     assert [m.id for m in state.inbox("bob")] == ["LATE", "EARLY"]
 
 
-def test_turns_count_both_directions_since_either_human_turn() -> None:
+def _at(msg_id: str, sender: str, to: str, minutes_ago: float) -> MessageEvent:
+    ts = now() - timedelta(minutes=minutes_ago)
+    return MessageEvent(id=msg_id, sender=sender, to=to, body=msg_id, thread=msg_id, ts=ts)
+
+
+def test_messages_between_counts_the_pair_both_ways_within_the_window() -> None:
     events: list[Event] = [
-        _m("1", "alice", "bob"),
-        _m("2", "bob", "alice"),
+        _at("old", "alice", "bob", 10),
+        _at("1", "alice", "bob", 2),
+        _at("2", "bob", "alice", 1),
         HumanTurnEvent(agent="bob", session="s"),
-        _m("3", "alice", "bob"),
-        _m("4", "bob", "alice"),
-        _m("5", "alice", "carol"),
+        _at("3", "alice", "carol", 1),
     ]
     state = BusState.from_events(events)
-    assert state.agent_turns_since_human("alice", "bob") == 2
-    assert state.agent_turns_since_human("bob", "alice") == 2
-    assert state.agent_turns_since_human("alice", "carol") == 1
-
-
-def test_a_third_agents_human_turn_does_not_reset_the_pair() -> None:
-    events: list[Event] = [
-        _m("1", "alice", "bob"),
-        HumanTurnEvent(agent="carol", session="s"),
-        _m("2", "bob", "alice"),
-    ]
-    assert BusState.from_events(events).agent_turns_since_human("alice", "bob") == 2
+    since = now() - timedelta(minutes=5)
+    assert state.messages_between("alice", "bob", since=since) == 2
+    assert state.messages_between("bob", "alice", since=since) == 2
+    assert state.messages_between("alice", "carol", since=since) == 1
 
 
 def test_duplicate_message_ids_keep_the_first() -> None:

@@ -110,7 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             anyio.run(serve, cfg)
             return 0
-        bus = Bus(store, cfg.require_agent(), cfg.max_agent_turns)
+        bus = Bus(
+            store, cfg.require_agent(), rate_limit=cfg.rate_limit, rate_window=cfg.rate_window
+        )
         if args.command == "send":
             body = sys.stdin.read() if args.body == "-" else args.body
             message = bus.send(args.to, body, kind=args.kind, reply_to=args.reply_to)

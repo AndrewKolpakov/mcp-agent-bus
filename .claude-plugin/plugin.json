@@ -12,7 +12,8 @@
       "env": {
         "AGENT_BUS_NAME": "${user_config.agent_name}",
         "AGENT_BUS_DIR": "${user_config.bus_dir}",
-        "AGENT_BUS_MAX_TURNS": "${user_config.max_agent_turns}"
+        "AGENT_BUS_RATE_LIMIT": "${user_config.rate_limit}",
+        "AGENT_BUS_RATE_WINDOW": "${user_config.rate_window_seconds}"
       }
     }
   },
@@ -32,13 +33,21 @@
       "description": "Directory shared by every account on this machine; holds the event log and session registry.",
       "default": "~/.agent-bus"
     },
-    "max_agent_turns": {
+    "rate_limit": {
       "type": "number",
-      "title": "Agent-to-agent message limit",
-      "description": "Messages two agents may exchange before a human has to speak again.",
-      "default": 600,
+      "title": "Loop guard: messages per window",
+      "description": "Most messages two agents may exchange within the window below; more looks like a loop and is refused.",
+      "default": 30,
       "min": 1,
       "max": 10000
+    },
+    "rate_window_seconds": {
+      "type": "number",
+      "title": "Loop guard: window in seconds",
+      "description": "Length of the sliding window for the message limit above.",
+      "default": 300,
+      "min": 10,
+      "max": 86400
     }
   }
 }

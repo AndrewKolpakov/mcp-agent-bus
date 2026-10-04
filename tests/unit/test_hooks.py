@@ -41,7 +41,7 @@ def bus_dir(tmp_path: Path) -> Path:
 
 
 def test_sessions_off_the_bus_get_nothing(bus_dir: Path) -> None:
-    Bus(Store(bus_dir), "alice", 6).send("bob", "hi")
+    Bus(Store(bus_dir), "alice").send("bob", "hi")
     env = {"AGENT_BUS_NAME": "bob", "AGENT_BUS_DIR": str(bus_dir)}
     for event in hooks.EVENTS:
         assert _run(event, env, {"prompt": "x", "session_id": "s"}) == ""
@@ -49,7 +49,7 @@ def test_sessions_off_the_bus_get_nothing(bus_dir: Path) -> None:
 
 
 def test_session_start_names_the_agent_and_lists_unread(bus_dir: Path) -> None:
-    msg = Bus(Store(bus_dir), "alice", 6).send("bob", "please review\nthe diff", kind="task")
+    msg = Bus(Store(bus_dir), "alice").send("bob", "please review\nthe diff", kind="task")
     output = json.loads(_run("session-start", _env(bus_dir)))
     assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     text = output["hookSpecificOutput"]["additionalContext"]
@@ -94,17 +94,17 @@ def test_only_this_bus_channel_events_are_not_human_turns(
 
 
 def test_stop_reminds_about_unhandled_messages_once_per_chain(bus_dir: Path) -> None:
-    msg = Bus(Store(bus_dir), "alice", 6).send("bob", "fyi")
+    msg = Bus(Store(bus_dir), "alice").send("bob", "fyi")
     output = json.loads(_run("stop", _env(bus_dir), {"stop_hook_active": False}))
     assert output["hookSpecificOutput"]["hookEventName"] == "Stop"
     assert msg.id in output["hookSpecificOutput"]["additionalContext"]
     assert _run("stop", _env(bus_dir), {"stop_hook_active": True}) == ""
-    Bus(Store(bus_dir), "bob", 6).ack(msg.id)
+    Bus(Store(bus_dir), "bob").ack(msg.id)
     assert _run("stop", _env(bus_dir), {"stop_hook_active": False}) == ""
 
 
 def test_long_listings_are_truncated(bus_dir: Path) -> None:
-    alice = Bus(Store(bus_dir), "alice", 50)
+    alice = Bus(Store(bus_dir), "alice")
     for i in range(hooks.LISTED + 3):
         alice.send("bob", f"m{i} " + "x" * 500)
     text = _context(_run("stop", _env(bus_dir)))

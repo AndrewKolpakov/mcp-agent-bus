@@ -45,14 +45,17 @@ def test_server_env_maps_every_user_config_option() -> None:
     assert env == {
         "AGENT_BUS_NAME": "${user_config.agent_name}",
         "AGENT_BUS_DIR": "${user_config.bus_dir}",
-        "AGENT_BUS_MAX_TURNS": "${user_config.max_agent_turns}",
+        "AGENT_BUS_RATE_LIMIT": "${user_config.rate_limit}",
+        "AGENT_BUS_RATE_WINDOW": "${user_config.rate_window_seconds}",
     }
-    assert set(manifest["userConfig"]) == {"agent_name", "bus_dir", "max_agent_turns"}
-    from agent_bus.config import DEFAULT_MAX_AGENT_TURNS
+    options = manifest["userConfig"]
+    assert set(options) == {"agent_name", "bus_dir", "rate_limit", "rate_window_seconds"}
+    from agent_bus.config import DEFAULT_RATE_LIMIT, DEFAULT_RATE_WINDOW_SECONDS
 
-    turns = manifest["userConfig"]["max_agent_turns"]
-    assert turns["default"] == DEFAULT_MAX_AGENT_TURNS
-    assert turns["min"] <= turns["default"] <= turns["max"]
+    assert options["rate_limit"]["default"] == DEFAULT_RATE_LIMIT
+    assert options["rate_window_seconds"]["default"] == DEFAULT_RATE_WINDOW_SECONDS
+    for name in ("rate_limit", "rate_window_seconds"):
+        assert options[name]["min"] <= options[name]["default"] <= options[name]["max"]
 
 
 def test_marketplace_serves_this_directory_as_the_plugin() -> None:

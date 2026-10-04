@@ -20,7 +20,7 @@ from .mcp_client import DISCOVER_PROBE, ServerProcess, tool_json
 ON_BUS = {
     "AGENT_BUS_SESSION": "1",
     "AGENT_BUS_NAME": "bob",
-    "AGENT_BUS_MAX_TURNS": "4",
+    "AGENT_BUS_RATE_LIMIT": "4",
     "AGENT_BUS_SETTLE_SECONDS": "0",
 }
 
@@ -50,7 +50,7 @@ def spawn(bus_dir: Path) -> Iterator[Spawn]:
 
 
 def _alice(bus_dir: Path) -> Bus:
-    return Bus(Store(bus_dir), "alice", max_agent_turns=4)
+    return Bus(Store(bus_dir), "alice", rate_limit=4)
 
 
 def test_discover_probe_is_refused_and_initialize_declares_the_channel(spawn: Spawn) -> None:

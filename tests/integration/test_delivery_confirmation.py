@@ -106,7 +106,7 @@ def open_session(tmp_path: Path, bus_dir: Path) -> Iterator[Open]:
 
 
 def _alice(bus_dir: Path) -> Bus:
-    return Bus(Store(bus_dir), "alice", max_agent_turns=50)
+    return Bus(Store(bus_dir), "alice", rate_limit=50)
 
 
 def _delivered(bus_dir: Path) -> list[str]:
@@ -197,9 +197,9 @@ def test_a_tool_call_revives_a_deaf_session_and_replays_what_it_lost(
 def test_a_human_turn_of_this_session_revives_it(open_session: Open, bus_dir: Path) -> None:
     session = open_session("S1", confirm="1")
     lost = _go_deaf(session, bus_dir)
-    Bus(Store(bus_dir), "bob", 50).record_human_turn("some-other-session")
+    Bus(Store(bus_dir), "bob").record_human_turn("some-other-session")
     assert session.no_push(1.5)
-    Bus(Store(bus_dir), "bob", 50).record_human_turn("S1")
+    Bus(Store(bus_dir), "bob").record_human_turn("S1")
     meta = _replayed(session)
     assert (meta["msg_id"], meta["redelivery"]) == (lost, "true")
 
