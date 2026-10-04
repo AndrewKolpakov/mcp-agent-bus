@@ -183,6 +183,27 @@ def _replayed(session: Session) -> dict[str, str]:
     return meta
 
 
+def test_an_acked_message_counts_as_delivered_and_is_never_replayed(
+    open_session: Open, bus_dir: Path
+) -> None:
+    session = open_session("S1", confirm="30")
+    msg = _alice(bus_dir).send("bob", "handled through the inbox tool")
+    session.server.channel_events()  # never reaches the transcript
+    Bus(Store(bus_dir), "bob").ack(msg.id)
+    assert _wait(lambda: _delivered(bus_dir) == [msg.id])
+    session.server.call("inbox")
+    assert session.no_push(1.5)
+
+
+def test_an_acked_but_undelivered_message_is_not_replayed_on_start(
+    open_session: Open, bus_dir: Path
+) -> None:
+    msg = _alice(bus_dir).send("bob", "acked before any session pushed it")
+    Bus(Store(bus_dir), "bob").ack(msg.id)
+    session = open_session("S1")
+    assert session.no_push(1.5)
+
+
 def test_a_tool_call_revives_a_deaf_session_and_replays_what_it_lost(
     open_session: Open, bus_dir: Path
 ) -> None:

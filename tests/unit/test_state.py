@@ -29,7 +29,7 @@ def test_unread_and_undelivered_follow_their_events() -> None:
     )
     assert [m.id for m in state.inbox("bob")] == ["A", "B"]
     assert [m.id for m in state.unread("bob")] == ["A"]
-    assert [m.id for m in state.undelivered("bob")] == ["B"]
+    assert [m.id for m in state.undelivered("bob")] == []  # B is acked, so not replayed
     assert [m.id for m in state.unread("alice")] == ["C"]
     assert state.agents() == {"alice", "bob"}
 

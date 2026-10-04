@@ -352,7 +352,11 @@ class BusServer:
             return
         self.watch_liveness()
         seen = self.transcript.new_channel_ids()
-        settled = seen & (set(self.pending) | self.late)
+        awaiting = set(self.pending) | self.late
+        if awaiting:
+            # An ack is proof of receipt too, whatever the transcript shows.
+            seen |= awaiting & BusState.from_events(self.store.read_all().events).acked
+        settled = seen & awaiting
         if settled:
             delivered = BusState.from_events(self.store.read_all().events).delivered
             for msg_id in sorted(settled):

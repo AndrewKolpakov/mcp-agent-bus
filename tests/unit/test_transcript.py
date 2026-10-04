@@ -103,6 +103,23 @@ def test_a_queued_command_attachment_confirms(tmp_path: Path) -> None:
     assert _reader(tmp_path, attachment).new_channel_ids() == {msg_id}
 
 
+def test_a_transcript_moved_to_another_project_folder_is_followed(tmp_path: Path) -> None:
+    import os
+
+    old_dir = tmp_path / "projects" / "-repo"
+    new_dir = tmp_path / "projects" / "-repo--claude-worktrees-feature"
+    old_dir.mkdir(parents=True)
+    first, second = new_id(), new_id()
+    _append(old_dir / "S.jsonl", channel_record(first))
+    reader = Transcript(tmp_path, "S")
+    assert reader.new_channel_ids() == {first}
+    os.utime(old_dir / "S.jsonl", (1, 1))  # the old file stops growing
+    new_dir.mkdir(parents=True)
+    _append(new_dir / "S.jsonl", channel_record(first), channel_record(second))
+    assert reader.new_channel_ids() == {first, second}
+    assert reader.path() == new_dir / "S.jsonl"
+
+
 def test_layout_known_needs_some_session_transcript(tmp_path: Path) -> None:
     reader = Transcript(tmp_path, "S")
     assert not reader.layout_known()

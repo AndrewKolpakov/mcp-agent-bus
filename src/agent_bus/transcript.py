@@ -74,6 +74,13 @@ def channel_ids(record: object) -> set[str]:
     return bus_ids(_text(message.get("content") if isinstance(message, dict) else None))
 
 
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
 class Transcript:
     def __init__(self, config_dir: Path, session: str) -> None:
         self.config_dir = config_dir
@@ -84,9 +91,23 @@ class Transcript:
         """msg_ids of each queued item, oldest first (empty for non-bus items)."""
 
     def path(self) -> Path | None:
-        if self._path is None:
-            matches = sorted((self.config_dir / "projects").glob(f"*/{self.session}.jsonl"))
-            self._path = matches[0] if matches else None
+        """The session's transcript, looked up afresh on every call.
+
+        Claude Code moves a session's transcript to another project folder
+        when the session changes directory, for example on entering a git
+        worktree; the old file then stops growing (stage-5 follow-up,
+        2026-10-04: a cached path left a live session deaf for 32 hours).
+        The most recently written match is the live one.
+        """
+        matches = list((self.config_dir / "projects").glob(f"*/{self.session}.jsonl"))
+        if not matches:
+            return self._path
+        newest = max(matches, key=_mtime)
+        if newest != self._path:
+            # Records already read from the old file reappear in the new one;
+            # confirming an id twice is harmless, missing one is not.
+            self._path, self._offset = newest, 0
+            self._queue.clear()
         return self._path
 
     def layout_known(self) -> bool:

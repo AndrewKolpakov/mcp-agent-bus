@@ -52,7 +52,12 @@ class BusState:
         return [m for m in self._to(agent) if m.id not in self.acked]
 
     def undelivered(self, agent: str) -> list[MessageEvent]:
-        return [m for m in self._to(agent) if m.id not in self.delivered]
+        """Messages to push: neither delivered nor acked.
+
+        An ack proves the agent got the message by some path (a hook listing,
+        the inbox tool), so pushing it again would only repeat it.
+        """
+        return [m for m in self._to(agent) if m.id not in self.delivered and m.id not in self.acked]
 
     def agents(self) -> set[str]:
         names = {m.sender for m in self.messages.values()} | {m.to for m in self.messages.values()}
