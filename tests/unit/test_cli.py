@@ -84,6 +84,7 @@ def test_peers_and_tail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
 def test_errors_go_to_stderr_with_exit_1(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("AGENT_BUS_AS", raising=False)
     monkeypatch.delenv("AGENT_BUS_NAME", raising=False)
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_AGENT_NAME", raising=False)
     assert _run(tmp_path, "--as", "alice", "send", "--to", "alice", "x") == 1

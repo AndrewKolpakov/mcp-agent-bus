@@ -42,6 +42,21 @@ def test_plugin_options_expand_home_and_parse_numbers() -> None:
     assert (cfg.rate_limit, cfg.rate_window) == (8, 60.0)
 
 
+def test_session_override_wins_over_bus_name_and_plugin_option() -> None:
+    env = {
+        "AGENT_BUS_AS": "carol",
+        "AGENT_BUS_NAME": "alice",
+        "CLAUDE_PLUGIN_OPTION_AGENT_NAME": "bob",
+    }
+    assert config.load(env).agent == "carol"
+    assert config.load({**env, "AGENT_BUS_AS": " "}).agent == "alice"
+
+
+def test_session_override_is_validated() -> None:
+    with pytest.raises(ValueError, match="invalid agent name"):
+        config.load({"AGENT_BUS_AS": "Bad Name", "AGENT_BUS_NAME": "alice"})
+
+
 def test_empty_and_unsubstituted_values_count_as_unset() -> None:
     env = {"AGENT_BUS_NAME": "", "CLAUDE_PLUGIN_OPTION_AGENT_NAME": "${user_config.agent_name}"}
     assert config.load(env).agent is None

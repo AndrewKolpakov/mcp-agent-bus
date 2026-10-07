@@ -3,6 +3,12 @@
 Precedence for each value: explicit argument, then `AGENT_BUS_*`, then the
 plugin's `CLAUDE_PLUGIN_OPTION_*` (exported to hooks), then the default. An
 empty value or an unsubstituted `${...}` placeholder counts as unset.
+
+The agent name has one more source ahead of `AGENT_BUS_NAME`: `AGENT_BUS_AS`,
+a per-session override from the launching shell. The manifest's `env` block
+sets `AGENT_BUS_NAME` for the server from the account's `agent_name`, which
+overrides the shell's value, so a shell `AGENT_BUS_NAME` would reach only the
+hooks. `AGENT_BUS_AS` is absent from that block and reaches both.
 """
 
 from __future__ import annotations
@@ -33,7 +39,8 @@ class Config:
     def require_agent(self) -> str:
         if self.agent is None:
             raise ValueError(
-                "agent name is not set: pass --as, or set AGENT_BUS_NAME or the plugin's agent_name"
+                "agent name is not set: pass --as, or set AGENT_BUS_AS, AGENT_BUS_NAME"
+                " or the plugin's agent_name"
             )
         return self.agent
 
@@ -54,7 +61,9 @@ def load(
 ) -> Config:
     env = os.environ if env is None else env
     raw_dir = bus_dir or _pick(env, "AGENT_BUS_DIR", "CLAUDE_PLUGIN_OPTION_BUS_DIR")
-    raw_agent = agent or _pick(env, "AGENT_BUS_NAME", "CLAUDE_PLUGIN_OPTION_AGENT_NAME")
+    raw_agent = agent or _pick(
+        env, "AGENT_BUS_AS", "AGENT_BUS_NAME", "CLAUDE_PLUGIN_OPTION_AGENT_NAME"
+    )
     raw_limit = _pick(env, "AGENT_BUS_RATE_LIMIT", "CLAUDE_PLUGIN_OPTION_RATE_LIMIT")
     raw_window = _pick(env, "AGENT_BUS_RATE_WINDOW", "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS")
     limit = DEFAULT_RATE_LIMIT if raw_limit is None else int(float(raw_limit))

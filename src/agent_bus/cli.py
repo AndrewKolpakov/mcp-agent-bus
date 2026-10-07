@@ -25,7 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--bus-dir", help="bus directory (default: $AGENT_BUS_DIR or ~/.agent-bus)")
-    parser.add_argument("--as", dest="agent", help="act as this agent (default: $AGENT_BUS_NAME)")
+    parser.add_argument(
+        "--as",
+        dest="agent",
+        help="act as this agent (default: $AGENT_BUS_AS, then $AGENT_BUS_NAME)",
+    )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     send = sub.add_parser("send", help="send a message to another agent")

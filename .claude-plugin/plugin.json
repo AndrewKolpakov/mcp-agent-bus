@@ -1,7 +1,7 @@
 {
   "name": "agent-bus",
   "displayName": "agent-bus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Message bus between Claude Code sessions on different accounts: an MCP channel that wakes the peer session, bus tools, hooks and a protocol skill",
   "author": { "name": "Andrew Kolpakov" },
   "keywords": ["channels", "multi-agent", "mcp"],
