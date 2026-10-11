@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: agent-bus stage 7 spike - one table, one Lambda, HTTP API and WebSocket API
+
+Parameters:
+  Name:
+    Type: String
+    Default: agent-bus-spike
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref Name
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Name}-hub
+      RetentionInDays: 7
+
+  WsAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /agent-bus/${Name}/ws-access
+      RetentionInDays: 7
+
+  HttpAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /agent-bus/${Name}/http-access
+      RetentionInDays: 7
+
+  Hub:
+    Type: AWS::Serverless::Function
+    DependsOn: FunctionLogs
+    Properties:
+      FunctionName: !Sub ${Name}-hub
+      CodeUri: build/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 20
+      Environment:
+        Variables:
+          TABLE: !Ref Table
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/*
+
+  InvokeFromApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Hub
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- HTTP API: one catch-all route behind a Lambda authorizer -----------------
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Name}-http
+      ProtocolType: HTTP
+
+  HttpAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: token
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+      AuthorizerPayloadFormatVersion: "2.0"
+      EnableSimpleResponses: true
+      IdentitySource: [$request.header.Authorization]
+      AuthorizerResultTtlInSeconds: 60
+
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt Hub.Arn
+      PayloadFormatVersion: "2.0"
+
+  HttpRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: ANY /{proxy+}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref HttpAuthorizer
+      Target: !Sub integrations/${HttpIntegration}
+
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status","path":"$context.path","authError":"$context.authorizer.error","latency":"$context.responseLatency"}'
+
+  # --- WebSocket API --------------------------------------------------------------
+
+  WsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Name}-ws
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WsAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref WsApi
+      Name: credential
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+
+  WsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+
+  WsConnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $connect
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WsAuthorizer
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDisconnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${WsIntegration}
+
+  WsPing:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: ping
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDefault:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $default
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [WsConnect, WsDisconnect, WsPing, WsDefault]
+    Properties:
+      ApiId: !Ref WsApi
+
+  WsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WsApi
+      StageName: spike
+      DeploymentId: !Ref WsDeployment
+      DefaultRouteSettings:
+        LoggingLevel: INFO
+        DataTraceEnabled: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt WsAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","eventType":"$context.eventType","route":"$context.routeKey","connectionId":"$context.connectionId","status":"$context.status","disconnectStatus":"$context.disconnectStatusCode","disconnectReason":"$context.disconnectReason","authError":"$context.authorizer.error","ip":"$context.identity.sourceIp"}'
+
+Outputs:
+  HttpUrl:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  WsUrl:
+    Value: !Sub ${WsApi.ApiEndpoint}/spike
+  WsApiId:
+    Value: !Ref WsApi
+  TableName:
+    Value: !Ref Table
