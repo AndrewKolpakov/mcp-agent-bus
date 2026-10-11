@@ -768,7 +768,7 @@ serverless в AWS-аккаунте Setronica: API Gateway, Lambda, DynamoDB. Н�
 
 Стек `agent-bus-spike` в eu-central-1, аккаунт Setronica: одна таблица,
 одна лямбда python3.12 arm64 на 512 МБ, HTTP API и WebSocket API. Клиент —
-ноутбук в Юго-Восточной Азии, отсюда около 240 мс на запрос. Код и зонды —
+ноутбук примерно в 240 мс на запрос от региона. Код и зонды —
 в `spike/hub/`, запуск описан в `spike/hub/README.md`.
 
 | Вопрос | Ответ |
