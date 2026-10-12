@@ -13,7 +13,8 @@
         "AGENT_BUS_NAME": "${user_config.agent_name}",
         "AGENT_BUS_DIR": "${user_config.bus_dir}",
         "AGENT_BUS_RATE_LIMIT": "${user_config.rate_limit}",
-        "AGENT_BUS_RATE_WINDOW": "${user_config.rate_window_seconds}"
+        "AGENT_BUS_RATE_WINDOW": "${user_config.rate_window_seconds}",
+        "AGENT_BUS_HUB": "${user_config.hub_url}"
       }
     }
   },
@@ -48,6 +49,12 @@
       "default": 300,
       "min": 10,
       "max": 86400
+    },
+    "hub_url": {
+      "type": "string",
+      "title": "Hub address",
+      "description": "https:// address of an agent-bus hub, for agents on other machines. Empty keeps the bus local. The token goes in a file, see docs/hub.md.",
+      "required": false
     }
   }
 }

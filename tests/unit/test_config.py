@@ -83,3 +83,23 @@ def test_bad_values_are_rejected() -> None:
         config.load({"AGENT_BUS_RATE_WINDOW": "0"})
     with pytest.raises(ValueError, match="not set"):
         config.load({}).require_agent()
+
+
+def test_hub_comes_from_env_then_plugin_option() -> None:
+    assert config.load({}).hub is None
+    assert (
+        config.load({"CLAUDE_PLUGIN_OPTION_HUB_URL": "https://hub.example/"}).hub
+        == "https://hub.example"
+    )
+    both = {
+        "AGENT_BUS_HUB": "https://a.example",
+        "CLAUDE_PLUGIN_OPTION_HUB_URL": "https://b.example",
+    }
+    assert config.load(both).hub == "https://a.example"
+    assert config.load({"AGENT_BUS_HUB": "${user_config.hub_url}"}).hub is None
+
+
+@pytest.mark.parametrize("url", ["http://hub.example", "hub.example", "https://"])
+def test_hub_must_be_https(url: str) -> None:
+    with pytest.raises(ValueError, match="https://"):
+        config.load({"AGENT_BUS_HUB": url})

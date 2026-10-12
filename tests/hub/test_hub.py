@@ -3,87 +3,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from typing import Any
 
-import boto3
 import pytest
-from moto import mock_aws
+from hubfakes import ENDPOINT, Clock, RecordingPusher, clock, hub, pusher, table, tokens
+
+__all__ = ["clock", "hub", "pusher", "table", "tokens"]  # fixtures
 
 from agent_bus.hub import app
 from agent_bus.hub.app import Hub, HubError, Reply
 from agent_bus.hub.table import Claim, MessageRef, Table
 from agent_bus.models import EVENT_ADAPTER, MessageEvent, new_id
-
-ENDPOINT = "https://ws.example/dev"
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.t = 1_800_000_000.0
-
-    def __call__(self) -> float:
-        return self.t
-
-
-class RecordingPusher:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, dict[str, Any]]] = []
-        self.gone: set[str] = set()
-
-    def post(self, endpoint: str, conn: str, payload: dict[str, Any]) -> bool:
-        if conn in self.gone:
-            return False
-        self.posts.append((conn, payload))
-        return True
-
-    def seqs(self, conn: str) -> list[int]:
-        return [p["seq"] for c, p in self.posts if c == conn and "seq" in p]
-
-
-@pytest.fixture
-def table() -> Iterator[Table]:
-    with mock_aws():
-        client = boto3.client("dynamodb", region_name="eu-central-1")
-        client.create_table(
-            TableName="hub",
-            KeySchema=[
-                {"AttributeName": "pk", "KeyType": "HASH"},
-                {"AttributeName": "sk", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "pk", "AttributeType": "S"},
-                {"AttributeName": "sk", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        yield Table("hub", client)
-
-
-@pytest.fixture
-def tokens(table: Table) -> dict[str, str]:
-    """alice, bob and dave are on team core; carol is on team other with dave."""
-    issued = {name: table.create_agent(name) for name in ("alice", "bob", "carol", "dave")}
-    for name in ("alice", "bob", "dave"):
-        table.add_member("core", name)
-    for name in ("carol", "dave"):
-        table.add_member("other", name)
-    return issued
-
-
-@pytest.fixture
-def clock() -> Clock:
-    return Clock()
-
-
-@pytest.fixture
-def pusher() -> RecordingPusher:
-    return RecordingPusher()
-
-
-@pytest.fixture
-def hub(table: Table, tokens: dict[str, str], pusher: RecordingPusher, clock: Clock) -> Hub:
-    return Hub(table, pusher, rate_limit=3, rate_window=300, clock=clock)
 
 
 def send(hub: Hub, sender: str, to: str, body: str = "hi", **extra: Any) -> dict[str, Any]:
@@ -415,6 +345,12 @@ def test_http_routes_through_the_adapter(hub: Hub) -> None:
     assert json.loads(app.handler(http_event("GET", "/peers", "carol"), None, hub)["body"]) == [
         {"name": "dave", "live": False}
     ]
+
+
+def test_hello_names_the_agent_and_the_websocket(table: Table, tokens: dict[str, str]) -> None:
+    hub = Hub(table, RecordingPusher(), ws_url="wss://ws.example/bus")
+    got = app.handler(http_event("GET", "/hello", "bob"), None, hub)
+    assert json.loads(got["body"]) == {"agent": "bob", "ws": "wss://ws.example/bus"}
 
 
 def test_authorizers_resolve_tokens(hub: Hub, tokens: dict[str, str]) -> None:

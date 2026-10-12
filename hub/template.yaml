@@ -67,6 +67,7 @@ Resources:
           TABLE: !Ref Table
           RATE_LIMIT: !Ref RateLimit
           RATE_WINDOW_SECONDS: !Ref RateWindowSeconds
+          WS_URL: !Sub ${WsApi.ApiEndpoint}/bus
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Table

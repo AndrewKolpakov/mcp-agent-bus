@@ -9,6 +9,9 @@ a per-session override from the launching shell. The manifest's `env` block
 sets `AGENT_BUS_NAME` for the server from the account's `agent_name`, which
 overrides the shell's value, so a shell `AGENT_BUS_NAME` would reach only the
 hooks. `AGENT_BUS_AS` is absent from that block and reaches both.
+
+`hub` is the hub's HTTP address (PLAN.md, v2). Set, it replaces the local
+directory as the bus; the token comes from a file, never from here.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from agent_bus.models import check_agent_name
 
@@ -35,6 +39,8 @@ class Config:
     rate_window: float
     on_bus: bool
     """True only for a session launched with AGENT_BUS_SESSION=1."""
+    hub: str | None = None
+    """The hub's https address, or None for the local bus."""
 
     def require_agent(self) -> str:
         if self.agent is None:
@@ -66,16 +72,23 @@ def load(
     )
     raw_limit = _pick(env, "AGENT_BUS_RATE_LIMIT", "CLAUDE_PLUGIN_OPTION_RATE_LIMIT")
     raw_window = _pick(env, "AGENT_BUS_RATE_WINDOW", "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS")
+    raw_hub = _pick(env, "AGENT_BUS_HUB", "CLAUDE_PLUGIN_OPTION_HUB_URL")
     limit = DEFAULT_RATE_LIMIT if raw_limit is None else int(float(raw_limit))
     window = DEFAULT_RATE_WINDOW_SECONDS if raw_window is None else float(raw_window)
     if limit < 1:
         raise ValueError(f"rate limit must be at least 1 message, got {raw_limit!r}")
     if window <= 0:
         raise ValueError(f"rate window must be positive, got {raw_window!r}")
+    hub = raw_hub.rstrip("/") if raw_hub else None
+    if hub is not None:
+        parsed = urlparse(hub)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(f"hub must be an https:// address, got {raw_hub!r}")
     return Config(
         bus_dir=Path(raw_dir or DEFAULT_BUS_DIR).expanduser(),
         agent=check_agent_name(raw_agent) if raw_agent else None,
         rate_limit=limit,
         rate_window=window,
         on_bus=env.get(SESSION_OPT_IN, "").strip() == "1",
+        hub=hub,
     )

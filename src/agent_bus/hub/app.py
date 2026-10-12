@@ -118,7 +118,9 @@ class Hub:
         rate_limit: int = DEFAULT_RATE_LIMIT,
         rate_window: float = DEFAULT_RATE_WINDOW_SECONDS,
         clock: Callable[[], float] = time.time,
+        ws_url: str = "",
     ) -> None:
+        self.ws_url = ws_url
         self.table = table
         self.pusher = pusher
         self.rate_limit = rate_limit
@@ -127,6 +129,10 @@ class Hub:
 
     def now(self) -> datetime:
         return datetime.fromtimestamp(self.clock(), UTC)
+
+    def hello(self, agent: str) -> Reply:
+        """Who the token belongs to and where the WebSocket is: all a client needs to start."""
+        return Reply(200, {"agent": agent, "ws": self.ws_url})
 
     # --- events -------------------------------------------------------------
 
@@ -332,6 +338,7 @@ def _hub() -> Hub:
         ApiGatewayPusher(),
         rate_limit=int(os.environ.get("RATE_LIMIT", DEFAULT_RATE_LIMIT)),
         rate_window=float(os.environ.get("RATE_WINDOW_SECONDS", DEFAULT_RATE_WINDOW_SECONDS)),
+        ws_url=os.environ.get("WS_URL", ""),
     )
 
 
@@ -393,7 +400,9 @@ def http(event: dict[str, Any], hub: Hub) -> dict[str, Any]:
     agent = ctx["authorizer"]["lambda"]["agent"]
     route = (ctx["http"]["method"], ctx["http"]["path"])
     try:
-        if route == ("POST", "/events"):
+        if route == ("GET", "/hello"):
+            reply = hub.hello(agent)
+        elif route == ("POST", "/events"):
             reply = hub.post_event(agent, _json_body(event))
         elif route == ("GET", "/events"):
             reply = hub.events(agent, event.get("queryStringParameters") or {})

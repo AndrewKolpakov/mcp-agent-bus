@@ -47,9 +47,10 @@ def test_server_env_maps_every_user_config_option() -> None:
         "AGENT_BUS_DIR": "${user_config.bus_dir}",
         "AGENT_BUS_RATE_LIMIT": "${user_config.rate_limit}",
         "AGENT_BUS_RATE_WINDOW": "${user_config.rate_window_seconds}",
+        "AGENT_BUS_HUB": "${user_config.hub_url}",
     }
     options = manifest["userConfig"]
-    assert set(options) == {"agent_name", "bus_dir", "rate_limit", "rate_window_seconds"}
+    assert set(options) == {"agent_name", "bus_dir", "rate_limit", "rate_window_seconds", "hub_url"}
     from agent_bus.config import DEFAULT_RATE_LIMIT, DEFAULT_RATE_WINDOW_SECONDS
 
     assert options["rate_limit"]["default"] == DEFAULT_RATE_LIMIT
