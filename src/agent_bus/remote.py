@@ -38,7 +38,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from agent_bus import __version__
-from agent_bus.bus import BusError, RateLimitError
+from agent_bus.bus import BusError, HubUnavailableError, RateLimitError
 from agent_bus.models import EVENT_ADAPTER, Event, dump_event
 from agent_bus.store import LOG_NAME, ReadResult, Store
 
@@ -52,10 +52,6 @@ PEERS_TTL_SECONDS = 5.0
 TAIL_BYTES = 64 * 1024
 """Block size for reading the mirror backwards to find its last seq."""
 MAX_BACKOFF_SECONDS = 60.0
-
-
-class HubUnavailableError(BusError):
-    """The hub could not be reached or failed; the request may be retried."""
 
 
 def hub_home(bus_dir: Path, hub: str, agent: str) -> Path:

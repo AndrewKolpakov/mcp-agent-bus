@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any, TextIO
 
 from agent_bus import config
-from agent_bus.backend import open_backend
+from agent_bus.backend import HOOK_TIMEOUT_SECONDS, open_backend
 from agent_bus.bus import Bus
 from agent_bus.models import MessageEvent
 from agent_bus.names import CHANNEL_PROMPT_PREFIX, PLUGIN_NAME, TOOL_PREFIX
@@ -107,7 +107,7 @@ def run(
                 )
                 json.dump(_context("SessionStart", text), sink)
             return 0
-        backend = open_backend(cfg)
+        backend = open_backend(cfg, timeout=HOOK_TIMEOUT_SECONDS)
         bus = Bus(
             backend.store,
             cfg.agent,

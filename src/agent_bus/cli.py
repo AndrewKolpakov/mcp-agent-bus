@@ -54,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     hook = sub.add_parser("hook", help="run a Claude Code hook (Claude Code starts this)")
     hook.add_argument("event", choices=hooks.EVENTS)
 
+    sub.add_parser(
+        "hub-token",
+        help="store this agent's hub token, read from stdin, in a file only you can read",
+    )
+    sub.add_parser("sync", help="bring the local mirror of a hub up to date")
+
     tail = sub.add_parser("tail", help="print the event log")
     tail.add_argument("-f", "--follow", action="store_true", help="keep printing new events")
     tail.add_argument("--json", action="store_true", help="raw log lines")
@@ -93,6 +99,20 @@ def _tail(store: EventStore, *, follow: bool, raw: bool) -> int:
     return 0
 
 
+def _hub_token(cfg: config.Config) -> int:
+    if cfg.hub is None:
+        raise BusError("no hub configured: set AGENT_BUS_HUB or the plugin's hub_url")
+    from agent_bus.remote import TOKEN_NAME, hub_home, write_token
+
+    token = sys.stdin.read().strip()
+    if not token:
+        raise BusError("no token on stdin")
+    path = hub_home(cfg.bus_dir, cfg.hub, cfg.require_agent()) / TOKEN_NAME
+    write_token(path, token)
+    print(f"saved to {path}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -105,15 +125,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return hooks.run(args.event)
     try:
         cfg = config.load(bus_dir=args.bus_dir, agent=args.agent)
-        backend = open_backend(cfg)
-        if args.command == "tail":
-            return _tail(backend.store, follow=args.follow, raw=args.json)
         if args.command == "serve":
+            # The server opens the backend itself and reports a broken hub
+            # setup to the session instead of failing to start.
             import anyio
 
             from agent_bus.server import serve
 
             anyio.run(serve, cfg)
+            return 0
+        if args.command == "hub-token":
+            return _hub_token(cfg)
+        backend = open_backend(cfg)
+        if args.command == "tail":
+            return _tail(backend.store, follow=args.follow, raw=args.json)
+        if args.command == "sync":
+            from agent_bus.remote import HubStore
+
+            if not isinstance(backend.store, HubStore):
+                raise BusError("sync needs a hub: set AGENT_BUS_HUB or the plugin's hub_url")
+            print(f"{backend.store.sync()} new events")
             return 0
         bus = Bus(
             backend.store,

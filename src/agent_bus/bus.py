@@ -32,6 +32,10 @@ class RateLimitError(BusError):
     pass
 
 
+class HubUnavailableError(BusError):
+    """The hub could not be reached or failed; the request may be retried."""
+
+
 # Ping-pong is agents answering answers ("done" -> "thanks" -> "you're welcome").
 # A result or an await_human ends its chain: it can be acked, and a result can
 # be followed by a new task, but never answered with more talk. The rate limit

@@ -16,12 +16,12 @@ import pytest
 from hubfakes import clock, hub, pusher, table, tokens
 
 from agent_bus import remote
-from agent_bus.bus import Bus, BusError, RateLimitError
+from agent_bus.bus import Bus, BusError, HubUnavailableError, RateLimitError
 from agent_bus.hub import app
 from agent_bus.hub.app import Hub
 from agent_bus.hub.table import Claim, Table
 from agent_bus.models import MessageEvent
-from agent_bus.remote import HubApi, HubLink, HubRegistry, HubStore, HubUnavailableError
+from agent_bus.remote import HubApi, HubLink, HubRegistry, HubStore
 
 __all__ = ["clock", "hub", "pusher", "table", "tokens"]  # fixtures
 
@@ -342,3 +342,52 @@ def _fast_sleep(real: Callable[[float], Any]) -> Callable[[float], Any]:
         await real(min(delay, 0.05))
 
     return sleep
+
+
+# --- the server in hub mode ---------------------------------------------------
+
+
+def _hub_server(tmp_path: Path, agent: str = "bob") -> Any:
+    from agent_bus.config import load
+    from agent_bus.server import BusServer
+
+    cfg = load(
+        {"AGENT_BUS_SESSION": "1", "AGENT_BUS_NAME": agent, "AGENT_BUS_HUB": URL},
+        bus_dir=str(tmp_path / "bus"),
+    )
+    return BusServer(cfg)
+
+
+def test_a_server_without_a_token_stays_off_the_bus_and_says_why(tmp_path: Path) -> None:
+    server = _hub_server(tmp_path)
+    assert server.bus is None
+    assert server.list_tools() == []
+    assert "no hub token at" in server.instructions()
+
+
+def test_a_server_whose_token_is_another_agents_stays_off_the_bus(tmp_path: Path) -> None:
+    remote.write_token(remote.hub_home(tmp_path / "bus", URL, "bob") / remote.TOKEN_NAME, "ab_x")
+    server = _hub_server(tmp_path)
+    assert server.bus is not None
+    server.backend.api.hello = lambda: {"agent": "mallory", "ws": "wss://ws"}
+    anyio.run(server.check_hub)
+    assert server.bus is None
+    assert server.link is None
+    assert "belongs to agent 'mallory', not 'bob'" in server.instructions()
+
+
+def test_a_server_learns_the_socket_address_from_hello(tmp_path: Path) -> None:
+    remote.write_token(remote.hub_home(tmp_path / "bus", URL, "bob") / remote.TOKEN_NAME, "ab_x")
+    server = _hub_server(tmp_path)
+    server.backend.api.hello = lambda: {"agent": "bob", "ws": "wss://ws/bus"}
+    anyio.run(server.check_hub)
+    assert server.bus is not None
+    assert server.link.ws_url == "wss://ws/bus"
+
+
+def test_a_token_readable_by_others_is_refused(tmp_path: Path) -> None:
+    path = remote.hub_home(tmp_path / "bus", URL, "bob") / remote.TOKEN_NAME
+    remote.write_token(path, "ab_x")
+    path.chmod(0o644)
+    server = _hub_server(tmp_path)
+    assert "readable by others" in server.instructions()

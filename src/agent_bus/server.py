@@ -26,6 +26,12 @@ up in the session transcript (transcript.py):
 - Without a transcript to read (no session id, or the file is not found)
   the push counts as delivered at once, as before confirmation existed.
 
+On a hub (PLAN.md, v2) the log the server follows is the agent's local
+mirror, which `HubLink` keeps in sync over a WebSocket, and the claim lives
+on the hub and names that socket. So in hub mode the server first checks
+its token with `GET /hello` and waits for the socket's first pong, and
+only then claims the channel and writes its instructions.
+
 A session without the channel keeps trying to claim it, so a new
 foreground session takes over from one that went deaf or ended. On every
 gain of the channel the server pushes each message to this agent that has
@@ -52,12 +58,12 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 
 from agent_bus import __version__
-from agent_bus.backend import open_backend
-from agent_bus.bus import Bus, BusError
+from agent_bus.backend import Backend, open_backend
+from agent_bus.bus import Bus, BusError, HubUnavailableError
 from agent_bus.config import SESSION_OPT_IN, Config
 from agent_bus.models import KINDS, HumanTurnEvent, MessageEvent, new_id
 from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME
-from agent_bus.registry import HEARTBEAT_SECONDS
+from agent_bus.registry import HEARTBEAT_SECONDS, Registry
 from agent_bus.state import BusState
 from agent_bus.store import Store
 from agent_bus.transcript import Transcript
@@ -72,6 +78,9 @@ TOOLS_LIST_TIMEOUT_SECONDS = 60.0
 # A busy session writes a queued event to its transcript only when its
 # current turn ends, so the window covers a long turn, not a round trip.
 CONFIRM_SECONDS = 120.0
+LINK_WAIT_SECONDS = 10.0
+HELLO_RETRY_SECONDS = 30.0
+"""How long a hub session waits for its socket before claiming the channel."""
 DISCOVER_PROBE_LOG = "Failed to validate request"
 
 INSTRUCTIONS_ON_BUS = """\
@@ -116,6 +125,10 @@ session start and at the end of each turn; read them with the inbox tool."""
 OFF_BUS = f"""\
 agent-bus is installed but this session is not on the bus. Sessions join it only \
 when launched with {SESSION_OPT_IN}=1."""
+
+HUB_PROBLEM = """\
+agent-bus: this session opted in to the bus, but it cannot use the hub: {problem}. \
+It is not on the bus. Tell your user."""
 
 NO_AGENT_NAME = f"""\
 agent-bus: this session was launched with {SESSION_OPT_IN}=1, but the plugin's \
@@ -220,13 +233,23 @@ class BusServer:
         self.late: set[str] = set()
         """Pushes whose deadline passed; still confirmed if they show up."""
         self.deaf = False
-        backend = open_backend(cfg)
+        self.problem: str | None = None
+        """Why an opted-in session is off the bus after all."""
+        self.on_bus = cfg.on_bus and cfg.agent is not None
+        backend = Backend(store=Store(cfg.bus_dir), registry=Registry(Store(cfg.bus_dir)))
+        if self.on_bus:
+            try:
+                backend = open_backend(cfg)
+            except (BusError, ValueError) as exc:
+                self.problem = str(exc)
+                self.on_bus = False
+        self.backend = backend
         self.store = backend.store
         self.registry = backend.registry
+        self.link = backend.link
         # Liveness looks only at events written after this server started.
         self._liveness_offset = self.store.size()
         self.session = new_id()
-        self.on_bus = cfg.on_bus and cfg.agent is not None
         self.bus = (
             Bus(
                 self.store,
@@ -258,7 +281,47 @@ class BusServer:
         if self.bus is not None and self.owns_channel:
             self.registry.release(self.bus.me, self.session)
 
+    async def check_hub(self) -> None:
+        """Make sure the token is this agent's and learn the socket's address.
+
+        An unreachable hub is not fatal: the link keeps asking, and the
+        mirror still serves reads. A token of another agent is, since every
+        message would then go out under that agent's name.
+        """
+        if self.link is None or self.backend.api is None:
+            return
+        try:
+            hello = await anyio.to_thread.run_sync(self.backend.api.hello)
+        except BusError as exc:
+            if isinstance(exc, HubUnavailableError):
+                log.warning("hub not reachable at start: %s", exc)
+                return
+            self.go_off_bus(str(exc))
+            return
+        if hello.get("agent") != self.cfg.agent:
+            self.go_off_bus(
+                f"its token belongs to agent {hello.get('agent')!r}, not {self.cfg.agent!r}"
+            )
+            return
+        self.link.ws_url = str(hello.get("ws") or "")
+
+    async def keep_link(self) -> None:
+        """Run the hub socket, first asking the hub where it is if the start could not."""
+        while self.link is not None and not self.link.ws_url:
+            await anyio.sleep(HELLO_RETRY_SECONDS)
+            await self.check_hub()
+        if self.link is not None:
+            await self.link.run()
+
+    def go_off_bus(self, problem: str) -> None:
+        log.error("off the bus: %s", problem)
+        self.problem = problem
+        self.bus = None
+        self.link = None
+
     def instructions(self) -> str:
+        if self.problem is not None:
+            return HUB_PROBLEM.format(problem=self.problem)
         if self.bus is None:
             # Opted in but unnamed is a configuration gap, not a missing env
             # var; saying so keeps the user from debugging the wrong thing.
@@ -560,37 +623,51 @@ async def serve(cfg: Config) -> None:
         transcript=Transcript(config_dir, claude_session) if claude_session else None,
         confirm_seconds=float(os.environ.get("AGENT_BUS_CONFIRM_SECONDS", CONFIRM_SECONDS)),
     )
+    try:
+        async with anyio.create_task_group() as hub_tasks:
+            await app.check_hub()
+            if app.link is not None:
+                hub_tasks.start_soon(app.keep_link)
+                if app.link.ws_url:
+                    with anyio.move_on_after(LINK_WAIT_SECONDS):
+                        await app.link.connected.wait()
+                if not app.link.connected.is_set():
+                    log.warning("no hub socket within %ss; claiming later", LINK_WAIT_SECONDS)
+            await run_session(app, heartbeat_seconds)
+            hub_tasks.cancel_scope.cancel()
+    finally:
+        app.release()
+        log.info("stop pid=%s", os.getpid())
+
+
+async def run_session(app: BusServer, heartbeat_seconds: float) -> None:
     app.claim()
     server = build_server(app)
     init = server.create_initialization_options(experimental_capabilities={CHANNEL_CAPABILITY: {}})
     initialized = anyio.Event()
-    try:
-        async with stdio_server() as (read_stream, write_stream):
-            in_send, in_recv = anyio.create_memory_object_stream[SessionMessage | Exception](100)
-            session_write = write_stream.clone()
-            # stdio_server's stdout writer runs until every clone of the
-            # write stream is closed, so both are closed on the way out.
-            async with write_stream, session_write, anyio.create_task_group() as tg:
+    async with stdio_server() as (read_stream, write_stream):
+        in_send, in_recv = anyio.create_memory_object_stream[SessionMessage | Exception](100)
+        session_write = write_stream.clone()
+        # stdio_server's stdout writer runs until every clone of the
+        # write stream is closed, so both are closed on the way out.
+        async with write_stream, session_write, anyio.create_task_group() as tg:
 
-                async def tap_in() -> None:
-                    async with in_send:
-                        async for message in read_stream:
-                            if isinstance(message, SessionMessage):
-                                method = getattr(message.message.root, "method", None)
-                                if method == "notifications/initialized":
-                                    initialized.set()
-                            await in_send.send(message)
-                    # stdin closed: the client is gone, so everything stops.
-                    tg.cancel_scope.cancel()
-
-                tg.start_soon(tap_in)
-                tg.start_soon(exit_on_signal, app)
-                if app.bus is not None and not app.background:
-                    tg.start_soon(app.watch, write_stream, initialized)
-                    tg.start_soon(app.channel_loop, heartbeat_seconds)
-                    tg.start_soon(app.confirm_loop)
-                await server.run(in_recv, session_write, init)
+            async def tap_in() -> None:
+                async with in_send:
+                    async for message in read_stream:
+                        if isinstance(message, SessionMessage):
+                            method = getattr(message.message.root, "method", None)
+                            if method == "notifications/initialized":
+                                initialized.set()
+                        await in_send.send(message)
+                # stdin closed: the client is gone, so everything stops.
                 tg.cancel_scope.cancel()
-    finally:
-        app.release()
-        log.info("stop pid=%s", os.getpid())
+
+            tg.start_soon(tap_in)
+            tg.start_soon(exit_on_signal, app)
+            if app.bus is not None and not app.background:
+                tg.start_soon(app.watch, write_stream, initialized)
+                tg.start_soon(app.channel_loop, heartbeat_seconds)
+                tg.start_soon(app.confirm_loop)
+            await server.run(in_recv, session_write, init)
+            tg.cancel_scope.cancel()
