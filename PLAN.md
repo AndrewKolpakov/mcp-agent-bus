@@ -796,7 +796,7 @@ serverless в AWS-аккаунте Setronica: API Gateway, Lambda, DynamoDB. Н�
 Дочитывание `GET /events?after=` вернуло все тела по порядку. Посторонний
 агент видит пустое представление.
 
-Удаление стенда:
+Стенд `agent-bus-spike` удалён 2026-10-12 этими командами:
 
 ```bash
 AWS_PROFILE=setronica sam delete --stack-name agent-bus-spike --region eu-central-1 --no-prompts
