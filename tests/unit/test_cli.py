@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -116,3 +117,55 @@ def test_codex_wrapper_puts_only_this_session_on_the_bus(tmp_path: Path) -> None
     assert overrides["mcp_servers.agent-bus.args"] == '["-m", "agent_bus", "serve"]'
     assert argv[-3:-1] == ["-m", "gpt-x"]
     assert 'agent "codex"' in argv[-1]
+
+
+def test_claude_wrapper_keeps_the_environment_and_loads_the_channel(tmp_path: Path) -> None:
+    out = tmp_path / "claude-run.json"
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"json.dump({{'argv': sys.argv[1:], 'env': dict(os.environ)}}, open({str(out)!r}, 'w'))\n"
+    )
+    fake.chmod(0o755)
+    venv_bin = str(Path(sys.prefix) / "bin")
+    env = {
+        "PATH": os.pathsep.join([venv_bin, str(fake.parent), "/usr/bin", "/bin"]),
+        "HOME": str(tmp_path),
+        "CLAUDE_CONFIG_DIR": "/accounts/second",
+        "VIRTUAL_ENV": sys.prefix,
+        "UV_PROJECT_ENVIRONMENT": sys.prefix,
+    }
+    done = subprocess.run(
+        [sys.executable, "-m", "agent_bus", "--as", "zed", "claude", "--", "--model", "sonnet"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 0, done.stderr
+    run = json.loads(out.read_text())
+    assert run["argv"] == [
+        "--allowedTools",
+        "mcp__plugin_agent-bus_bus",
+        "--dangerously-load-development-channels",
+        "plugin:agent-bus@agent-bus-dev",
+        "--model",
+        "sonnet",
+    ]
+    assert run["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/second"
+    assert run["env"]["AGENT_BUS_SESSION"] == "1"
+    assert run["env"]["AGENT_BUS_AS"] == "zed"
+    assert "VIRTUAL_ENV" not in run["env"]
+    assert "UV_PROJECT_ENVIRONMENT" not in run["env"]
+    assert venv_bin not in run["env"]["PATH"].split(os.pathsep)
+
+
+def test_session_env_keeps_what_is_not_ours() -> None:
+    from agent_bus.cli import session_env
+
+    env = session_env(
+        {"VIRTUAL_ENV": "/elsewhere/venv", "PATH": "/a:/b", "CLAUDE_CONFIG_DIR": "/x"}
+    )
+    assert env == {"VIRTUAL_ENV": "/elsewhere/venv", "PATH": "/a:/b", "CLAUDE_CONFIG_DIR": "/x"}

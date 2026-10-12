@@ -7,6 +7,8 @@ stage-0 live runs). A test pins these constants to the manifest.
 """
 
 PLUGIN_NAME = "agent-bus"
+MARKETPLACE = "agent-bus-dev"
+PLUGIN_ID = f"{PLUGIN_NAME}@{MARKETPLACE}"
 SERVER_KEY = "bus"
 CHANNEL_SOURCE = f"plugin:{PLUGIN_NAME}:{SERVER_KEY}"
 CHANNEL_PROMPT_PREFIX = f'<channel source="{CHANNEL_SOURCE}"'

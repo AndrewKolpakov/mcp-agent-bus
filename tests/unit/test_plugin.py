@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 from agent_bus import __version__
-from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME, SERVER_KEY, TOOL_PREFIX
+from agent_bus.names import CHANNEL_SOURCE, MARKETPLACE, PLUGIN_NAME, SERVER_KEY, TOOL_PREFIX
 from agent_bus.server import INSTRUCTIONS_ON_BUS, TOOLS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +62,7 @@ def test_server_env_maps_every_user_config_option() -> None:
 def test_marketplace_serves_this_directory_as_the_plugin() -> None:
     marketplace = _json(".claude-plugin/marketplace.json")
     assert [(p["name"], p["source"]) for p in marketplace["plugins"]] == [(PLUGIN_NAME, "./")]
+    assert marketplace["name"] == MARKETPLACE
 
 
 def test_no_project_mcp_config_at_the_plugin_root() -> None:

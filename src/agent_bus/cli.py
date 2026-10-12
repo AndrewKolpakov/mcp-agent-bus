@@ -12,12 +12,14 @@ import os
 import shutil
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from agent_bus import __version__, admin, config, hooks
 from agent_bus.backend import open_backend
 from agent_bus.bus import Bus, BusError
 from agent_bus.models import KINDS, Event, MessageEvent
+from agent_bus.names import PERMISSION_RULE, PLUGIN_ID
 from agent_bus.store import EventStore
 
 
@@ -61,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="store this agent's hub token, read from stdin, in a file only you can read",
     )
     sub.add_parser("sync", help="bring the local mirror of a hub up to date")
+
+    claude = sub.add_parser(
+        "claude",
+        help="start a Claude Code session on the bus",
+        description="Start Claude Code on the bus with the channel loaded, keeping the "
+        "current environment (CLAUDE_CONFIG_DIR and the rest). --as picks the agent for "
+        "this session. Arguments after -- go to claude.",
+    )
+    claude.add_argument("claude_args", nargs=argparse.REMAINDER, help="arguments for claude")
 
     codex = sub.add_parser(
         "codex",
@@ -125,6 +136,53 @@ def _hub_token(cfg: config.Config) -> int:
     return 0
 
 
+def session_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The caller's environment for a session, without agent-bus's own venv.
+
+    Run through scripts/run.sh or uvx, this process sees its venv in
+    VIRTUAL_ENV, PATH and UV_PROJECT_ENVIRONMENT; left there, they would make
+    `uv run` in the session's projects use agent-bus's venv.
+    """
+    env = dict(environ)
+    venv = Path(sys.prefix).resolve()
+
+    def ours(path: str, target: Path) -> bool:
+        return bool(path) and Path(path).resolve() == target
+
+    for key in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"):
+        if ours(env.get(key, ""), venv):
+            del env[key]
+    if "PATH" in env:
+        parts = env["PATH"].split(os.pathsep)
+        env["PATH"] = os.pathsep.join(p for p in parts if not ours(p, venv / "bin"))
+    return env
+
+
+def claude_argv(claude_bin: str, extra: Sequence[str]) -> list[str]:
+    rest = list(extra[1:] if extra[:1] == ["--"] else extra)
+    return [
+        claude_bin,
+        "--allowedTools",
+        PERMISSION_RULE,
+        "--dangerously-load-development-channels",
+        f"plugin:{PLUGIN_ID}",
+        *rest,
+    ]
+
+
+def _claude(agent: str | None, extra: Sequence[str]) -> int:
+    env = session_env(os.environ)
+    claude_bin = shutil.which("claude", path=env.get("PATH"))
+    if claude_bin is None:
+        raise BusError("claude is not on PATH")
+    env["AGENT_BUS_SESSION"] = "1"
+    if agent:
+        # AGENT_BUS_AS, not AGENT_BUS_NAME: the manifest's env block sets the
+        # latter for the server from agent_name, over the shell's value.
+        env["AGENT_BUS_AS"] = agent
+    os.execve(claude_bin, claude_argv(claude_bin, extra), env)
+
+
 CODEX_SERVER = "agent-bus"
 CODEX_OPENING = (
     'You are on agent-bus as agent "{me}". Call its peers tool once, then tell me in one '
@@ -166,10 +224,11 @@ def codex_argv(cfg: config.Config, codex_bin: str, extra: Sequence[str]) -> list
 
 
 def _codex(cfg: config.Config, extra: Sequence[str]) -> int:
-    codex_bin = shutil.which("codex")
+    env = session_env(os.environ)
+    codex_bin = shutil.which("codex", path=env.get("PATH"))
     if codex_bin is None:
         raise BusError("codex is not on PATH")
-    os.execv(codex_bin, codex_argv(cfg, codex_bin, extra))
+    os.execve(codex_bin, codex_argv(cfg, codex_bin, extra), env)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -200,6 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _hub_token(cfg)
         if args.command == "codex":
             return _codex(cfg, args.codex_args)
+        if args.command == "claude":
+            return _claude(args.agent, args.claude_args)
         backend = open_backend(cfg)
         if args.command == "tail":
             return _tail(backend.store, follow=args.follow, raw=args.json)

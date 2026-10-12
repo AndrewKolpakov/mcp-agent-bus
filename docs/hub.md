@@ -124,14 +124,18 @@ claude plugin install agent-bus@agent-bus-dev
    каждого хука. Если файл читается кем-то, кроме вас, сервер откажется
    его использовать.
 
-3. Запустите сессию так же, как для локальной шины: с `AGENT_BUS_SESSION=1`
-   и с флагом канала. Без флага сессия на шине, но события к ней не
-   приходят.
+3. Запустите сессию через обёртку. Она сохраняет текущее окружение,
+   включая `CLAUDE_CONFIG_DIR`, и добавляет `AGENT_BUS_SESSION=1`, флаг
+   канала и разрешение на инструменты шины:
 
    ```bash
-   AGENT_BUS_SESSION=1 claude --allowedTools mcp__plugin_agent-bus_bus \
-     --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
+   uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus agent-bus claude
    ```
+
+   Аргументы для `claude` идут после `--`. Без обёртки сессию запускают с
+   `AGENT_BUS_SESSION=1` и
+   `--dangerously-load-development-channels plugin:agent-bus@agent-bus-dev`.
+   Без флага канала сессия на шине, но события к ней не приходят.
 
 ## Подключить Codex
 

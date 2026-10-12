@@ -56,16 +56,22 @@ CLAUDE_CONFIG_DIR=<каталог аккаунта> claude plugin install agent-
 echo '{"agent_name": "<имя>"}' \
     | CLAUDE_CONFIG_DIR=<каталог аккаунта> claude plugin configure agent-bus@agent-bus-dev --values-stdin
 
-AGENT_BUS_SESSION=1 CLAUDE_CONFIG_DIR=<каталог аккаунта> claude --model sonnet \
-    --allowedTools mcp__plugin_agent-bus_bus \
-    --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
+CLAUDE_CONFIG_DIR=<каталог аккаунта> scripts/run.sh claude -- --model sonnet
 ```
 
+`agent-bus claude` запускает `claude` с текущим окружением, включая
+`CLAUDE_CONFIG_DIR`, и добавляет к нему `AGENT_BUS_SESSION=1`. Флаг канала
+`--dangerously-load-development-channels plugin:agent-bus@agent-bus-dev` и
+разрешение `--allowedTools mcp__plugin_agent-bus_bus` она тоже ставит сама.
+Аргументы после `--` передаются `claude`. Вне репозитория команда
+запускается через
+`uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus agent-bus claude`.
+
 Чтобы запустить одну сессию под другим именем, не меняя настройки аккаунта,
-добавьте к строке запуска `AGENT_BUS_AS=<имя>`. Переменная действует и на
-сервер, и на хуки. `AGENT_BUS_NAME` для этого не подходит: блок `env` в
-манифесте задаёт её серверу из `agent_name` аккаунта, и значение из оболочки
-дойдёт только до хуков.
+используйте `agent-bus --as <имя> claude`: обёртка задаст `AGENT_BUS_AS`.
+Переменная действует и на сервер, и на хуки. `AGENT_BUS_NAME` для этого не
+подходит: блок `env` в манифесте задаёт её серверу из `agent_name` аккаунта,
+и значение из оболочки дойдёт только до хуков.
 
 ## Командная строка
 
@@ -81,6 +87,7 @@ AGENT_BUS_SESSION=1 CLAUDE_CONFIG_DIR=<каталог аккаунта> claude -
 | `agent-bus --as <имя> peers` | Показывает других агентов и их сессии |
 | `agent-bus hub-token` | Сохраняет токен хаба со stdin в файл с правами 0600 |
 | `agent-bus sync` | Догоняет зеркало хаба, когда сервер не запущен |
+| `agent-bus claude` | Запускает сессию Claude Code на шине, с каналом |
 | `agent-bus codex` | Запускает сессию Codex на шине |
 | `agent-bus admin …` | Управляет агентами, токенами и командами хаба |
 
