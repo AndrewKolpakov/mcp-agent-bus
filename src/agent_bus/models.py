@@ -7,6 +7,9 @@ replaying the log (see state.py). That keeps the log append-only.
 `DeliveredEvent.session` is the server process's own id. `HumanTurnEvent`
 carries Claude Code's session id from hook input, which the server also
 sees as CLAUDE_CODE_SESSION_ID and logs at start.
+
+`seq` is set only by a hub (PLAN.md, v2): its position in the hub's single
+order. The local bus leaves it out and orders by position in the file.
 """
 
 from __future__ import annotations
@@ -51,11 +54,21 @@ def check_agent_name(name: str) -> str:
     return name
 
 
+def check_team_name(name: str) -> str:
+    """Team names follow the agent-name rule; a team is a hub permission, not an event field."""
+    if not AGENT_NAME.fullmatch(name):
+        raise ValueError(
+            f"invalid team name {name!r}: use 1-32 of a-z, 0-9, '_' or '-', starting alphanumeric"
+        )
+    return name
+
+
 class _Event(BaseModel):
     model_config = ConfigDict(frozen=True, populate_by_name=True, extra="ignore")
 
     v: int = SCHEMA_VERSION
     ts: datetime = Field(default_factory=now)
+    seq: int | None = None
 
 
 class MessageEvent(_Event):
@@ -111,6 +124,23 @@ Event = Annotated[
     Field(discriminator="type"),
 ]
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
+
+
+def participants(event: Event, original: MessageEvent | None = None) -> frozenset[str]:
+    """The agents who see `event`: on a hub, the views it is written to.
+
+    A message belongs to its sender and recipient. An ack or a delivery
+    belongs to the parties of the message it settles, so the sender learns
+    the message was handled; `original` is that message and is required for
+    them. Human activity belongs to the agent alone.
+    """
+    if isinstance(event, MessageEvent):
+        return frozenset({event.sender, event.to})
+    if isinstance(event, AckEvent | DeliveredEvent):
+        if original is None or original.id != event.id:
+            raise ValueError(f"{event.type} {event.id} needs the message it settles")
+        return frozenset({original.sender, original.to})
+    return frozenset({event.agent})
 
 
 def dump_event(event: Event) -> bytes:

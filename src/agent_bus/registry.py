@@ -5,6 +5,11 @@ heartbeat is fresh AND its pid still exists: a crashed server leaves a
 fresh-looking file behind, and a recycled pid alone would look alive.
 Claims are serialized per agent with a lock file, so two sessions starting
 together cannot both win.
+
+`SessionRegistry` is what the bus and the server need from a registry.
+`Registry` is the local implementation. On a hub (PLAN.md, v2) the claim
+lives on the hub, liveness is a recent app-level ping instead of a pid, and
+the agents one may write to are one's teammates rather than everyone.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, ValidationError
 
@@ -41,6 +47,27 @@ def pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+class SessionRegistry(Protocol):
+    def claim(self, agent: str, session: str, pid: int) -> bool:
+        """Take the agent's channel unless another live session holds it.
+
+        `pid` serves the local registry's liveness check; a hub ignores it.
+        """
+        ...
+
+    def heartbeat(self, agent: str, session: str) -> bool: ...
+
+    def release(self, agent: str, session: str) -> None: ...
+
+    def live_agents(self) -> set[str]:
+        """Agents with a live session holding their channel."""
+        ...
+
+    def teammates(self, agent: str) -> set[str] | None:
+        """Agents `agent` may message, or None when anyone on the bus may be."""
+        ...
 
 
 class Registry:
@@ -119,3 +146,10 @@ class Registry:
             if record and self.is_live(record):
                 records[record.agent] = record
         return records
+
+    def live_agents(self) -> set[str]:
+        return set(self.live())
+
+    def teammates(self, agent: str) -> set[str] | None:
+        # Everyone on a local bus is the same OS user.
+        return None

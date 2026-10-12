@@ -13,9 +13,10 @@ import time
 from collections.abc import Sequence
 
 from agent_bus import __version__, config, hooks
+from agent_bus.backend import open_backend
 from agent_bus.bus import Bus, BusError
 from agent_bus.models import KINDS, Event, MessageEvent
-from agent_bus.store import Store
+from agent_bus.store import EventStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,7 +79,7 @@ def _dump(event: Event) -> str:
     return event.model_dump_json(by_alias=True, exclude_none=True)
 
 
-def _tail(store: Store, *, follow: bool, raw: bool) -> int:
+def _tail(store: EventStore, *, follow: bool, raw: bool) -> int:
     result = store.read_all()
     offset = result.offset
     for event in result.events:
@@ -104,9 +105,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return hooks.run(args.event)
     try:
         cfg = config.load(bus_dir=args.bus_dir, agent=args.agent)
-        store = Store(cfg.bus_dir)
+        backend = open_backend(cfg)
         if args.command == "tail":
-            return _tail(store, follow=args.follow, raw=args.json)
+            return _tail(backend.store, follow=args.follow, raw=args.json)
         if args.command == "serve":
             import anyio
 
@@ -115,7 +116,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             anyio.run(serve, cfg)
             return 0
         bus = Bus(
-            store, cfg.require_agent(), rate_limit=cfg.rate_limit, rate_window=cfg.rate_window
+            backend.store,
+            cfg.require_agent(),
+            registry=backend.registry,
+            rate_limit=cfg.rate_limit,
+            rate_window=cfg.rate_window,
         )
         if args.command == "send":
             body = sys.stdin.read() if args.body == "-" else args.body

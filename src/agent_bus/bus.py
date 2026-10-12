@@ -16,9 +16,9 @@ from agent_bus.models import (
     new_id,
     now,
 )
-from agent_bus.registry import Registry
+from agent_bus.registry import Registry, SessionRegistry
 from agent_bus.state import BusState
-from agent_bus.store import Store
+from agent_bus.store import EventStore, Store
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -42,6 +42,17 @@ ALLOWED_REPLIES: dict[Kind, frozenset[Kind]] = {
 }
 
 
+def check_reply(original: MessageEvent, kind: Kind) -> None:
+    """Refuse answering a message whose kind ends its chain with anything but what it allows."""
+    allowed = ALLOWED_REPLIES.get(original.kind)
+    if allowed is not None and kind not in allowed:
+        hint = "; start the next step with kind='task'" if allowed else ""
+        raise BusError(
+            f"message {original.id} is kind={original.kind!r}, which ends its chain: "
+            f"do not answer it, ack it instead{hint}"
+        )
+
+
 @dataclass(frozen=True)
 class Peer:
     name: str
@@ -52,13 +63,19 @@ class Peer:
 class Bus:
     def __init__(
         self,
-        store: Store,
+        store: EventStore,
         me: str,
         *,
+        registry: SessionRegistry | None = None,
         rate_limit: int = DEFAULT_RATE_LIMIT,
         rate_window: float = DEFAULT_RATE_WINDOW_SECONDS,
     ) -> None:
         self.store = store
+        if registry is None:
+            if not isinstance(store, Store):
+                raise TypeError("a store other than the local one needs its own registry")
+            registry = Registry(store)
+        self.registry = registry
         self.me = check_agent_name(me)
         self.rate_limit = rate_limit
         self.rate_window = rate_window
@@ -91,14 +108,8 @@ class Bus:
         else:
             thread = msg_id
 
-        if original is not None and original.kind in ALLOWED_REPLIES:
-            allowed = ALLOWED_REPLIES[original.kind]
-            if kind not in allowed:
-                hint = "; start the next step with kind='task'" if allowed else ""
-                raise BusError(
-                    f"message {original.id} is kind={original.kind!r}, which ends its chain: "
-                    f"do not answer it, ack it instead{hint}"
-                )
+        if original is not None:
+            check_reply(original, kind)
 
         # await_human is how agents hand control back to the humans, so the
         # rate limit never refuses it.
@@ -113,10 +124,17 @@ class Bus:
                     "Send one message with kind='await_human' and wait for a human"
                 )
 
-        message = MessageEvent(
-            id=msg_id, sender=self.me, to=to, kind=kind, body=body, reply_to=reply_to, thread=thread
+        message = self.store.append(
+            MessageEvent(
+                id=msg_id,
+                sender=self.me,
+                to=to,
+                kind=kind,
+                body=body,
+                reply_to=reply_to,
+                thread=thread,
+            )
         )
-        self.store.append(message)
         # Replying settles the message being answered, but only when it was ours.
         if original is not None and original.to == self.me and original.id not in state.acked:
             self.store.append(AckEvent(id=original.id, by=self.me))
@@ -146,9 +164,15 @@ class Bus:
         self.store.append(HumanTurnEvent(agent=self.me, session=session))
 
     def peers(self) -> list[Peer]:
+        """Agents one may write to, each with how many of one's messages they left unacked.
+
+        On a hub the state is one's own view, so `unread_by_them` counts only
+        one's own messages; locally it counts everyone's.
+        """
         state = self.state()
-        live = Registry(self.store).live()
-        names = (state.agents() | set(live)) - {self.me}
+        live = self.registry.live_agents()
+        team = self.registry.teammates(self.me)
+        names = (state.agents() | live if team is None else team) - {self.me}
         return [
             Peer(name=name, live=name in live, unread_by_them=len(state.unread(name)))
             for name in sorted(names)

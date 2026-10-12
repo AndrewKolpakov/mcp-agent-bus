@@ -8,6 +8,11 @@ newline, so a line still being written is never half-read.
 
 Permissions are the authentication: the directory is 0700 and the log 0600,
 so only this OS user can put text in front of an agent.
+
+`EventStore` is what the bus, the server and the hooks need from a store.
+`Store` is the local implementation. A hub store (PLAN.md, v2) appends over
+HTTP and reads a local mirror of the agent's view, a JSONL file in this same
+format, so byte offsets and `ReadResult` mean the same for both.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import ValidationError
 
@@ -37,6 +43,20 @@ class ReadResult:
     """Complete lines that were not valid events (unknown type, bad JSON)."""
 
 
+class EventStore(Protocol):
+    def ensure(self) -> None: ...
+
+    def append[E: Event](self, event: E) -> E:
+        """Write `event`; return it as stored, which on a hub carries `seq`."""
+        ...
+
+    def size(self) -> int: ...
+
+    def read_from(self, offset: int = 0) -> ReadResult: ...
+
+    def read_all(self) -> ReadResult: ...
+
+
 class Store:
     def __init__(self, bus_dir: Path) -> None:
         self.bus_dir = bus_dir
@@ -47,7 +67,7 @@ class Store:
         self.bus_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.sessions_dir.mkdir(mode=0o700, exist_ok=True)
 
-    def append(self, event: Event) -> None:
+    def append[E: Event](self, event: E) -> E:
         self.ensure()
         line = dump_event(event)
         fd = os.open(self.log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -61,6 +81,7 @@ class Store:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+        return event
 
     def size(self) -> int:
         try:

@@ -52,11 +52,12 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 
 from agent_bus import __version__
+from agent_bus.backend import open_backend
 from agent_bus.bus import Bus, BusError
 from agent_bus.config import SESSION_OPT_IN, Config
 from agent_bus.models import KINDS, HumanTurnEvent, MessageEvent, new_id
 from agent_bus.names import CHANNEL_SOURCE, PLUGIN_NAME
-from agent_bus.registry import HEARTBEAT_SECONDS, Registry
+from agent_bus.registry import HEARTBEAT_SECONDS
 from agent_bus.state import BusState
 from agent_bus.store import Store
 from agent_bus.transcript import Transcript
@@ -219,17 +220,24 @@ class BusServer:
         self.late: set[str] = set()
         """Pushes whose deadline passed; still confirmed if they show up."""
         self.deaf = False
+        backend = open_backend(cfg)
+        self.store = backend.store
+        self.registry = backend.registry
         # Liveness looks only at events written after this server started.
-        self._liveness_offset = Store(cfg.bus_dir).size()
-        self.store = Store(cfg.bus_dir)
+        self._liveness_offset = self.store.size()
         self.session = new_id()
         self.on_bus = cfg.on_bus and cfg.agent is not None
         self.bus = (
-            Bus(self.store, cfg.agent, rate_limit=cfg.rate_limit, rate_window=cfg.rate_window)
+            Bus(
+                self.store,
+                cfg.agent,
+                registry=self.registry,
+                rate_limit=cfg.rate_limit,
+                rate_window=cfg.rate_window,
+            )
             if self.on_bus and cfg.agent
             else None
         )
-        self.registry = Registry(self.store)
         self.owns_channel = False
 
     def claim(self) -> None:

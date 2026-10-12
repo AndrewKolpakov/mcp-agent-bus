@@ -19,10 +19,10 @@ from collections.abc import Mapping
 from typing import Any, TextIO
 
 from agent_bus import config
+from agent_bus.backend import open_backend
 from agent_bus.bus import Bus
 from agent_bus.models import MessageEvent
 from agent_bus.names import CHANNEL_PROMPT_PREFIX, PLUGIN_NAME, TOOL_PREFIX
-from agent_bus.store import Store
 
 EVENTS = ("session-start", "user-prompt-submit", "stop")
 PREVIEW_CHARS = 200
@@ -107,8 +107,13 @@ def run(
                 )
                 json.dump(_context("SessionStart", text), sink)
             return 0
+        backend = open_backend(cfg)
         bus = Bus(
-            Store(cfg.bus_dir), cfg.agent, rate_limit=cfg.rate_limit, rate_window=cfg.rate_window
+            backend.store,
+            cfg.agent,
+            registry=backend.registry,
+            rate_limit=cfg.rate_limit,
+            rate_window=cfg.rate_window,
         )
         if event == "session-start":
             output: dict[str, Any] | None = session_start(bus)

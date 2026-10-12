@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import cast
 
 import pytest
 
-from agent_bus.bus import MAX_BODY_BYTES, Bus, BusError, RateLimitError
-from agent_bus.models import AckEvent, MessageEvent, now
+from agent_bus.bus import MAX_BODY_BYTES, Bus, BusError, RateLimitError, check_reply
+from agent_bus.models import AckEvent, Event, MessageEvent, now
+from agent_bus.registry import Registry
 from agent_bus.store import Store
 
 
@@ -131,3 +133,64 @@ def test_peers_lists_other_agents_with_their_unread(alice: Bus, bob: Bus) -> Non
     assert set(peers) == {"bob", "carol"}
     assert peers["bob"].unread_by_them == 1
     assert not peers["bob"].live
+
+
+class TeamRegistry:
+    """A registry as a hub presents it: a fixed team, some of it live."""
+
+    def __init__(self, team: set[str], live: set[str]) -> None:
+        self.team = team
+        self.live = live
+
+    def claim(self, agent: str, session: str, pid: int) -> bool:
+        return True
+
+    def heartbeat(self, agent: str, session: str) -> bool:
+        return True
+
+    def release(self, agent: str, session: str) -> None:
+        pass
+
+    def live_agents(self) -> set[str]:
+        return self.live
+
+    def teammates(self, agent: str) -> set[str] | None:
+        return self.team
+
+
+def test_peers_on_a_team_are_the_teammates_only(store: Store, alice: Bus) -> None:
+    alice.send("bob", "one")
+    alice.send("carol", "two")
+    on_team = Bus(store, "alice", registry=TeamRegistry({"alice", "bob", "dave"}, {"dave"}))
+    peers = {p.name: p for p in on_team.peers()}
+    assert set(peers) == {"bob", "dave"}
+    assert peers["bob"].unread_by_them == 1
+    assert peers["dave"].live
+    assert not peers["bob"].live
+
+
+def test_a_store_other_than_the_local_one_needs_a_registry(store: Store) -> None:
+    class Mirror:
+        def __getattr__(self, name: str) -> object:
+            return getattr(store, name)
+
+    with pytest.raises(TypeError, match="needs its own registry"):
+        Bus(Mirror(), "alice")  # type: ignore[arg-type]
+
+
+def test_send_returns_the_event_as_the_store_kept_it(store: Store) -> None:
+    class Sequencing(Store):
+        def append[E: Event](self, event: E) -> E:
+            return super().append(cast(E, event.model_copy(update={"seq": 7})))
+
+    sequenced = Sequencing(store.bus_dir)
+    message = Bus(sequenced, "alice", registry=Registry(sequenced)).send("bob", "x")
+    assert message.seq == 7
+
+
+def test_check_reply_is_the_chain_rule(alice: Bus) -> None:
+    result = MessageEvent(sender="bob", to="alice", kind="result", body="r", thread="T")
+    check_reply(result, "task")
+    with pytest.raises(BusError, match="ends its chain"):
+        check_reply(result, "text")
+    check_reply(MessageEvent(sender="bob", to="alice", body="t", thread="T"), "text")
