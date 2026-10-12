@@ -22,6 +22,11 @@ dependencies = [
     { name = "websockets" },
 ]
 
+[package.optional-dependencies]
+admin = [
+    { name = "boto3" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "boto3" },
@@ -42,11 +47,13 @@ hub = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.5" },
+    { name = "boto3", marker = "extra == 'admin'", specifier = ">=1.40" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.30,<2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "websockets", specifier = ">=14" },
 ]
+provides-extras = ["admin"]
 
 [package.metadata.requires-dev]
 dev = [

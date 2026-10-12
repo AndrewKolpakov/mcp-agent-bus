@@ -18,6 +18,10 @@ dependencies = [
     "websockets>=14",
 ]
 
+[project.optional-dependencies]
+# `agent-bus admin` writes a hub's table with the owner's AWS credentials.
+admin = ["boto3>=1.40"]
+
 [project.scripts]
 agent-bus = "agent_bus.cli:main"
 

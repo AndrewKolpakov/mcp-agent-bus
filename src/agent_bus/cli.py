@@ -12,7 +12,7 @@ import sys
 import time
 from collections.abc import Sequence
 
-from agent_bus import __version__, config, hooks
+from agent_bus import __version__, admin, config, hooks
 from agent_bus.backend import open_backend
 from agent_bus.bus import Bus, BusError
 from agent_bus.models import KINDS, Event, MessageEvent
@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="store this agent's hub token, read from stdin, in a file only you can read",
     )
     sub.add_parser("sync", help="bring the local mirror of a hub up to date")
+
+    admin.add_parser(sub)
 
     tail = sub.add_parser("tail", help="print the event log")
     tail.add_argument("-f", "--follow", action="store_true", help="keep printing new events")
@@ -123,6 +125,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Before config.load: a hook handles its own configuration errors and
         # always exits 0, so a misconfigured bus never blocks a turn.
         return hooks.run(args.event)
+    if args.command == "admin":
+        # The hub's owner, not an agent: no agent name or bus config needed.
+        return admin.run(args)
     try:
         cfg = config.load(bus_dir=args.bus_dir, agent=args.agent)
         if args.command == "serve":

@@ -116,13 +116,23 @@ class Table:
             TableName=self.name, Key={"pk": _s(pk), "sk": _s(sk)}, ConsistentRead=consistent
         ).get("Item")
 
-    def _query(self, pk: str, prefix: str, *, consistent: bool = False) -> Iterator[Item]:
+    def _query(
+        self, pk: str, prefix: str | None = None, *, consistent: bool = False
+    ) -> Iterator[Item]:
+        """Every row of partition `pk`, or those whose sk starts with `prefix`.
+
+        DynamoDB refuses an empty string in a key condition, so "all rows"
+        is no prefix rather than an empty one.
+        """
         kwargs: dict[str, Any] = {
             "TableName": self.name,
-            "KeyConditionExpression": "pk = :pk AND begins_with(sk, :p)",
-            "ExpressionAttributeValues": {":pk": _s(pk), ":p": _s(prefix)},
+            "KeyConditionExpression": "pk = :pk",
+            "ExpressionAttributeValues": {":pk": _s(pk)},
             "ConsistentRead": consistent,
         }
+        if prefix:
+            kwargs["KeyConditionExpression"] += " AND begins_with(sk, :p)"
+            kwargs["ExpressionAttributeValues"][":p"] = _s(prefix)
         while True:
             page = self.client.query(**kwargs)
             yield from page.get("Items", [])
@@ -158,9 +168,100 @@ class Table:
                         "Item": {"pk": _s(f"TOKEN#{digest}"), "sk": _s("AGENT"), "agent": _s(name)},
                     }
                 },
+                {"Put": {"TableName": self.name, "Item": {"pk": _s("AGENTS"), "sk": _s(name)}}},
             ]
         )
         return token
+
+    def agents(self) -> list[str]:
+        return sorted(_str(i, "sk") for i in self._query("AGENTS"))
+
+    def _token_hash_of(self, name: str) -> str | None:
+        item = self._get(f"AGENT#{name}", "PROFILE", consistent=True)
+        if item is None:
+            raise LookupError(f"no agent {name!r}")
+        return _str(item, "token_hash") if "token_hash" in item else None
+
+    def rotate_token(self, name: str) -> str:
+        """Give `name` a new token; the old one stops working at once (60 s for HTTP)."""
+        old = self._token_hash_of(name)
+        token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+        digest = token_hash(token)
+        items: list[TransactWriteItemTypeDef] = [
+            {
+                "Update": {
+                    "TableName": self.name,
+                    "Key": {"pk": _s(f"AGENT#{name}"), "sk": _s("PROFILE")},
+                    "UpdateExpression": "SET token_hash = :new",
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeValues": {":new": _s(digest)},
+                }
+            },
+            {
+                "Put": {
+                    "TableName": self.name,
+                    "Item": {"pk": _s(f"TOKEN#{digest}"), "sk": _s("AGENT"), "agent": _s(name)},
+                }
+            },
+        ]
+        if old is not None:
+            items.append(
+                {
+                    "Delete": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"TOKEN#{old}"), "sk": _s("AGENT")},
+                    }
+                }
+            )
+        self.client.transact_write_items(TransactItems=items)
+        return token
+
+    def revoke_token(self, name: str) -> bool:
+        """Leave `name` without a token; False if it had none."""
+        old = self._token_hash_of(name)
+        if old is None:
+            return False
+        self.client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"AGENT#{name}"), "sk": _s("PROFILE")},
+                        "UpdateExpression": "REMOVE token_hash",
+                        "ConditionExpression": "token_hash = :old",
+                        "ExpressionAttributeValues": {":old": _s(old)},
+                    }
+                },
+                {
+                    "Delete": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"TOKEN#{old}"), "sk": _s("AGENT")},
+                    }
+                },
+            ]
+        )
+        return True
+
+    def remove_agent(self, name: str) -> None:
+        """Delete the agent with its token, teams, claim and view.
+
+        The view goes too: a later agent given the same name must not read
+        this one's messages. Copies in other agents' views and the log stay.
+        """
+        self.revoke_token(name)
+        for team in self.teams(name):
+            self.remove_member(team, name)
+        keys = [
+            {"pk": item["pk"], "sk": item["sk"]}
+            for item in self._query(f"AGENT#{name}", consistent=True)
+        ]
+        for start in range(0, len(keys), 25):
+            self.client.batch_write_item(
+                RequestItems={
+                    self.name: [{"DeleteRequest": {"Key": key}} for key in keys[start : start + 25]]
+                }
+            )
+        self.client.delete_item(TableName=self.name, Key={"pk": _s("AGENTS"), "sk": _s(name)})
 
     def agent_for_token(self, token: str) -> str | None:
         item = self._get(f"TOKEN#{token_hash(token)}", "AGENT")
@@ -169,8 +270,24 @@ class Table:
     def add_member(self, team: str, agent: str) -> None:
         check_team_name(team)
         check_agent_name(agent)
+        try:
+            self._add_member(team, agent)
+        except ClientError as exc:
+            if _code(exc) == "TransactionCanceledException":
+                raise LookupError(f"no agent {agent!r}") from exc
+            raise
+
+    def _add_member(self, team: str, agent: str) -> None:
         self.client.transact_write_items(
             TransactItems=[
+                {
+                    "ConditionCheck": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"AGENT#{agent}"), "sk": _s("PROFILE")},
+                        "ConditionExpression": "attribute_exists(pk)",
+                    }
+                },
+                {"Put": {"TableName": self.name, "Item": {"pk": _s("TEAMS"), "sk": _s(team)}}},
                 {
                     "Put": {
                         "TableName": self.name,
@@ -206,6 +323,9 @@ class Table:
 
     def teams(self, agent: str) -> set[str]:
         return {_str(i, "sk").removeprefix("TEAM#") for i in self._query(f"AGENT#{agent}", "TEAM#")}
+
+    def all_teams(self) -> list[str]:
+        return sorted(_str(i, "sk") for i in self._query("TEAMS"))
 
     def members(self, team: str) -> set[str]:
         return {
@@ -327,6 +447,36 @@ class Table:
                     raise
             time.sleep(0.005 * attempt)
         raise SequencerGaveUpError(f"no free seq after {MAX_ATTEMPTS} attempts")
+
+    def log_tail(self, count: int) -> list[Event]:
+        """The last `count` events of the whole log, oldest first."""
+        items = self.client.query(
+            TableName=self.name,
+            KeyConditionExpression="pk = :pk",
+            ExpressionAttributeValues={":pk": _s("LOG")},
+            ScanIndexForward=False,
+            Limit=count,
+        ).get("Items", [])
+        return [EVENT_ADAPTER.validate_json(_str(i, "event")) for i in reversed(items)]
+
+    def log_after(self, seq: int) -> list[Event]:
+        return [
+            EVENT_ADAPTER.validate_json(_str(i, "event"))
+            for i in self._query_range("LOG", f"E#{seq_key(seq + 1)}", f"E#{seq_key(LAST_SEQ)}")
+        ]
+
+    def _query_range(self, pk: str, low: str, high: str) -> Iterator[Item]:
+        kwargs: dict[str, Any] = {
+            "TableName": self.name,
+            "KeyConditionExpression": "pk = :pk AND sk BETWEEN :lo AND :hi",
+            "ExpressionAttributeValues": {":pk": _s(pk), ":lo": _s(low), ":hi": _s(high)},
+        }
+        while True:
+            page = self.client.query(**kwargs)
+            yield from page.get("Items", [])
+            if "LastEvaluatedKey" not in page:
+                return
+            kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
     def view(self, agent: str, after: int, limit: int, max_bytes: int) -> list[str]:
         """Lines of `agent`'s view above `after`, in seq order, capped by count and size."""
