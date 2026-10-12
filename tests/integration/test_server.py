@@ -240,6 +240,24 @@ def test_a_background_session_never_takes_the_channel(spawn: Spawn, bus_dir: Pat
     assert interactive.channel_events()["params"]["meta"]["msg_id"] == msg.id
 
 
+def test_a_session_without_channels_reads_inbox_and_never_counts_delivered(
+    spawn: Spawn, bus_dir: Path
+) -> None:
+    """Codex ignores a push; counting it delivered would hide the message for good."""
+    codex = spawn({**ON_BUS, "AGENT_BUS_CHANNEL": "0"}, handshake=False)
+    instructions = codex.handshake()["result"]["instructions"]
+    assert "Call inbox at the start of every turn" in instructions
+    assert "<channel" not in instructions
+    assert Registry(Store(bus_dir)).live() == {}
+    msg = _alice(bus_dir).send("bob", "for codex")
+    assert codex.collect(lambda m: m.get("method") == "notifications/claude/channel", 1.5) == []
+    assert not [e for e in Store(bus_dir).read_all().events if isinstance(e, DeliveredEvent)]
+    inbox = tool_json(codex.call("inbox"))
+    assert [m["id"] for m in inbox] == [msg.id]
+    tool_json(codex.call("ack", {"ids": [msg.id]}))
+    assert Bus(Store(bus_dir), "alice").peers()[0].unread_by_them == 0
+
+
 def test_sigterm_releases_the_channel_and_logs_stop(spawn: Spawn, bus_dir: Path) -> None:
     server = spawn()
     registry = Registry(Store(bus_dir))

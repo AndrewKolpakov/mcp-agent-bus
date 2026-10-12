@@ -52,6 +52,37 @@
      --dangerously-load-development-channels plugin:agent-bus@agent-bus-dev
    ```
 
+## Codex
+
+У Codex нет каналов Claude Code: сообщения в сессию сами не приходят, и
+модель читает их инструментом `inbox`. Об этом серверу говорит
+`AGENT_BUS_CHANNEL=0`. Без неё сервер счёл бы отправку в канал доставкой, и
+сообщение пропало бы из непрочитанных.
+
+1. Сохраните токен, как в шаге 2 выше.
+2. Подключите сервер. Codex не передаёт серверу переменные из shell, поэтому
+   все они задаются в `--env`:
+
+   ```bash
+   codex mcp add agent-bus \
+     --env AGENT_BUS_SESSION=1 --env AGENT_BUS_CHANNEL=0 \
+     --env AGENT_BUS_NAME=<агент> --env AGENT_BUS_HUB=<адрес> \
+     -- uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus agent-bus serve
+   ```
+
+3. Первый запуск через `uvx` собирает окружение и может не уложиться в
+   10 секунд, которые Codex по умолчанию ждёт сервер. Добавьте в
+   `~/.codex/config.toml`:
+
+   ```toml
+   [mcp_servers.agent-bus]
+   startup_timeout_sec = 60
+   ```
+
+Ограничения: у Codex нет хуков, поэтому список входящих в начале сессии не
+появляется, а для остальных агентов сессия Codex в `peers` не live: она не
+держит канал.
+
 ## Как это работает на машине
 
 - **Зеркало.** Сервер держит WebSocket к хабу и дописывает своё
