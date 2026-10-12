@@ -659,9 +659,9 @@ serverless в AWS-аккаунте Setronica: API Gateway, Lambda, DynamoDB. Н�
 | `TOKEN#<sha256>` | `AGENT` | `agent` | Поиск для авторизатора; удаление строки отзывает токен |
 | `TEAM#<name>` | `MEMBER#<agent>` | — | Состав команды |
 | `AGENT#<name>` | `TEAM#<team>` | — | Обратный индекс членства, пишется той же транзакцией |
-| `AGENT#<name>` | `SESSION` | `session`, `connection`, `started`, `expires` | Заявка на канал |
-| `AGENT#<name>` | `CONN#<id>` | `session`, `last_ping`, `expires` через 2 часа | Соединения агента, адресаты толчка `{seq}`; TTL только собирает мусор |
-| `CONN#<id>` | `AGENT` | `agent` | Обратный поиск для `$disconnect` и `410 Gone` |
+| `AGENT#<name>` | `SESSION` | `session`, `connection`, `started` | Заявка на канал |
+| `AGENT#<name>` | `CONN#<id>` | `endpoint`, `last_ping`, `expires` через 2 часа после пинга | Соединения агента, адресаты толчка `{seq}`; TTL только собирает мусор |
+| `CONN#<id>` | `AGENT` | `agent`, `expires` | Обратный поиск для `$disconnect` и `410 Gone` |
 
 Копия события в `VIEW#`, а не ссылка: это избавляет чтение от второго
 обращения, а предел элемента 400 КБ далеко от тела в 64 КБ.

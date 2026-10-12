@@ -22,6 +22,9 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "boto3" },
+    { name = "boto3-stubs", extra = ["apigatewaymanagementapi", "dynamodb"] },
+    { name = "moto", extra = ["dynamodb"] },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pyyaml" },
@@ -43,6 +46,9 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boto3", specifier = ">=1.40" },
+    { name = "boto3-stubs", extras = ["apigatewaymanagementapi", "dynamodb"], specifier = ">=1.40" },
+    { name = "moto", extras = ["dynamodb"], specifier = ">=5.1" },
     { name = "mypy", specifier = ">=1.18" },
     { name = "pytest", specifier = ">=8.4" },
     { name = "pyyaml", specifier = ">=6.0.3" },
