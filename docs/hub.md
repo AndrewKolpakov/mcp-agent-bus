@@ -60,23 +60,33 @@
 сообщение пропало бы из непрочитанных.
 
 1. Сохраните токен, как в шаге 2 выше.
-2. Подключите сервер. Codex не передаёт серверу переменные из shell, поэтому
-   все они задаются в `--env`:
+2. Подключите сервер. Codex передаёт серверу только переменные, заданные в
+   `--env` или перечисленные в `env_vars`:
 
    ```bash
    codex mcp add agent-bus \
-     --env AGENT_BUS_SESSION=1 --env AGENT_BUS_CHANNEL=0 \
+     --env AGENT_BUS_CHANNEL=0 \
      --env AGENT_BUS_NAME=<агент> --env AGENT_BUS_HUB=<адрес> \
      -- uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus agent-bus serve
    ```
 
-3. Первый запуск через `uvx` собирает окружение и может не уложиться в
-   10 секунд, которые Codex по умолчанию ждёт сервер. Добавьте в
-   `~/.codex/config.toml`:
+3. Добавьте в `~/.codex/config.toml`, в уже созданную секцию:
 
    ```toml
    [mcp_servers.agent-bus]
    startup_timeout_sec = 60
+   env_vars = ["AGENT_BUS_SESSION"]
+   ```
+
+   `env_vars` пропускает к серверу `AGENT_BUS_SESSION` из shell, и на шину,
+   как и у Claude Code, входит только сессия, запущенная с ним. Первый
+   запуск через `uvx` собирает окружение и не укладывается в 10 секунд,
+   которые Codex по умолчанию ждёт сервер.
+
+4. Запустите сессию:
+
+   ```bash
+   AGENT_BUS_SESSION=1 codex
    ```
 
 Ограничения: у Codex нет хуков, поэтому список входящих в начале сессии не
