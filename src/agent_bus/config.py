@@ -10,9 +10,11 @@ sets `AGENT_BUS_NAME` for the server from the account's `agent_name`, which
 overrides the shell's value, so a shell `AGENT_BUS_NAME` would reach only the
 hooks. `AGENT_BUS_AS` is absent from that block and reaches both.
 
-`channel` is off (AGENT_BUS_CHANNEL=0) for a client without Claude Code
-channels, such as Codex: the server then never pushes and never takes the
-channel, and the model reads messages with the inbox tool.
+`channel` says how messages reach the session (AGENT_BUS_CHANNEL):
+`claude` (1, the default) pushes them over Claude Code's channel; `inbox`
+(0) pushes nothing and never takes the channel, so the model reads them
+with the inbox tool; `codex` queues each one into the Codex session with
+`codex queue`, which `agent-bus codex` sets up.
 
 `hub` is the hub's HTTP address (PLAN.md, v2). Set, it replaces the local
 directory as the bus; the token comes from a file, never from here.
@@ -24,6 +26,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from agent_bus.models import check_agent_name
@@ -33,6 +36,9 @@ DEFAULT_RATE_WINDOW_SECONDS = 300.0
 
 DEFAULT_BUS_DIR = "~/.agent-bus"
 SESSION_OPT_IN = "AGENT_BUS_SESSION"
+
+type Channel = Literal["claude", "inbox", "codex"]
+CHANNELS: dict[str, Channel] = {"1": "claude", "0": "inbox", "codex": "codex"}
 
 
 @dataclass(frozen=True)
@@ -45,8 +51,8 @@ class Config:
     """True only for a session launched with AGENT_BUS_SESSION=1."""
     hub: str | None = None
     """The hub's https address, or None for the local bus."""
-    channel: bool = True
-    """False for a client that cannot take channel events, such as Codex."""
+    channel: Channel = "claude"
+    """How messages reach the session; see the module docstring."""
 
     def require_agent(self) -> str:
         if self.agent is None:
@@ -80,8 +86,8 @@ def load(
     raw_window = _pick(env, "AGENT_BUS_RATE_WINDOW", "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS")
     raw_hub = _pick(env, "AGENT_BUS_HUB", "CLAUDE_PLUGIN_OPTION_HUB_URL")
     raw_channel = (_pick(env, "AGENT_BUS_CHANNEL") or "1").lower()
-    if raw_channel not in {"0", "1"}:
-        raise ValueError(f"AGENT_BUS_CHANNEL must be 0 or 1, got {raw_channel!r}")
+    if raw_channel not in CHANNELS:
+        raise ValueError(f"AGENT_BUS_CHANNEL must be 1, 0 or codex, got {raw_channel!r}")
     limit = DEFAULT_RATE_LIMIT if raw_limit is None else int(float(raw_limit))
     window = DEFAULT_RATE_WINDOW_SECONDS if raw_window is None else float(raw_window)
     if limit < 1:
@@ -100,5 +106,5 @@ def load(
         rate_window=window,
         on_bus=env.get(SESSION_OPT_IN, "").strip() == "1",
         hub=hub,
-        channel=raw_channel == "1",
+        channel=CHANNELS[raw_channel],
     )

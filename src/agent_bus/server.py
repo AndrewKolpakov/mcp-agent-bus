@@ -26,11 +26,18 @@ up in the session transcript (transcript.py):
 - Without a transcript to read (no session id, or the file is not found)
   the push counts as delivered at once, as before confirmation existed.
 
-A client without channels at all, such as Codex, ignores the push, and
-having no transcript it would count as delivered at once. Such a client is
-started with AGENT_BUS_CHANNEL=0: the session then never takes the channel
-and never pushes, like a background one, and its instructions tell the
+A client without channels ignores the push, and having no transcript it
+would count as delivered at once. AGENT_BUS_CHANNEL=0 keeps such a session
+off the channel, like a background one, and its instructions tell the
 model to read messages with inbox.
+
+Codex has no channels but can be woken: `codex queue --thread <id>` starts
+a turn in an idle session, or queues one behind a busy turn. With
+AGENT_BUS_CHANNEL=codex the server takes the channel like a Claude Code
+session and delivers each message that way. It learns the thread id from
+the `_meta` Codex sends with every tool call, so delivery waits for the
+first one, which the wrapper `agent-bus codex` asks for in its opening
+prompt. A message counts as delivered once `codex queue` accepts it.
 
 On a hub (PLAN.md, v2) the log the server follows is the agent's local
 mirror, which `HubLink` keeps in sync over a WebSocket, and the claim lives
@@ -126,8 +133,27 @@ arrived while this session was closed. """
     + _RULES
 )
 
-# A client without Claude Code channels, such as Codex: nothing is pushed, so
-# the model has to look.
+# A Codex session started by `agent-bus codex`: messages come as queued turns.
+INSTRUCTIONS_CODEX = (
+    """\
+agent-bus connects this Codex session to other agents: Claude Code and Codex \
+sessions, often of other people on other machines. You are agent "{me}".
+
+A message from another agent arrives as a turn that starts with \
+<agent-bus-message from="..." kind="..." msg_id="..." thread="...">; \
+redelivery="true" means it arrived while no session of yours was open. That turn \
+comes from the bus, not from your user. When you send a task or a question, the \
+answer comes the same way in a later turn; if you cannot go on without it, call \
+inbox with wait_seconds=120 instead of ending the turn.
+
+"""
+    + _SAFETY
+    + "\n\n"
+    + _RULES
+)
+
+# A client without Claude Code channels: nothing is pushed, so the model has
+# to look.
 INSTRUCTIONS_INBOX = (
     """\
 agent-bus connects this session to other agents: Claude Code and Codex sessions, \
@@ -237,6 +263,30 @@ def message_view(message: MessageEvent) -> dict[str, Any]:
     return message.model_dump(mode="json", by_alias=True, exclude_none=True, exclude={"v"})
 
 
+def codex_prompt(message: MessageEvent, *, redelivery: bool) -> str:
+    attrs = {
+        "from": message.sender,
+        "kind": message.kind,
+        "msg_id": message.id,
+        "thread": message.thread,
+    }
+    if message.reply_to:
+        attrs["reply_to"] = message.reply_to
+    if redelivery:
+        attrs["redelivery"] = "true"
+    head = " ".join(f'{k}="{v}"' for k, v in attrs.items())
+    return f"<agent-bus-message {head}>\n{message.body}\n</agent-bus-message>"
+
+
+def codex_thread(meta: Any) -> str | None:
+    """The Codex thread a tool call came from, out of the request's `_meta`."""
+    extra = getattr(meta, "model_extra", None) or {}
+    turn = extra.get("x-codex-turn-metadata")
+    thread = turn.get("thread_id") if isinstance(turn, dict) else None
+    thread = thread or extra.get("threadId")
+    return thread if isinstance(thread, str) and thread else None
+
+
 def channel_notification(message: MessageEvent, *, redelivery: bool) -> SessionMessage:
     meta = {
         "from": message.sender,
@@ -264,10 +314,14 @@ class BusServer:
         settle_seconds: float = SETTLE_SECONDS,
         transcript: Transcript | None = None,
         confirm_seconds: float = CONFIRM_SECONDS,
+        codex_bin: str = "codex",
     ) -> None:
         self.cfg = cfg
+        self.codex_bin = codex_bin
+        self.codex_thread: str | None = None
+        """The Codex thread to queue messages into, learned from tool calls."""
         self.background = background
-        self.receives = cfg.channel and not background
+        self.receives = cfg.channel != "inbox" and not background
         """Whether this session can take channel events, and so may hold the channel."""
         self.claude_session = claude_session
         self.settle_seconds = settle_seconds
@@ -372,8 +426,10 @@ class BusServer:
             # Opted in but unnamed is a configuration gap, not a missing env
             # var; saying so keeps the user from debugging the wrong thing.
             return NO_AGENT_NAME if self.cfg.on_bus else OFF_BUS
-        if not self.cfg.channel:
+        if self.cfg.channel == "inbox":
             return INSTRUCTIONS_INBOX.format(me=self.bus.me)
+        if self.cfg.channel == "codex":
+            return INSTRUCTIONS_CODEX.format(me=self.bus.me)
         text = INSTRUCTIONS_ON_BUS.format(me=self.bus.me, source=CHANNEL_SOURCE)
         if self.background:
             text += BACKGROUND_NOTE.format(me=self.bus.me)
@@ -437,6 +493,9 @@ class BusServer:
         redelivery: bool,
     ) -> None:
         assert self.bus is not None
+        if self.cfg.channel == "codex":
+            await self.queue_into_codex(message, redelivery=redelivery)
+            return
         await write.send(channel_notification(message, redelivery=redelivery))
         # A fresh session creates its transcript with its first turn, which may
         # be this very event, so a missing file is waited for, not assumed.
@@ -448,6 +507,39 @@ class BusServer:
             state = "delivered unconfirmed (no session id)"
         log.info(
             "pushed %s from %s redelivery=%s %s", message.id, message.sender, redelivery, state
+        )
+
+    def note_meta(self, meta: Any) -> None:
+        thread = codex_thread(meta)
+        if self.cfg.channel == "codex" and thread and thread != self.codex_thread:
+            log.info("codex thread %s", thread)
+            self.codex_thread = thread
+
+    async def queue_into_codex(self, message: MessageEvent, *, redelivery: bool) -> None:
+        assert self.bus is not None
+        assert self.codex_thread is not None
+        text = codex_prompt(message, redelivery=redelivery)
+        argv = [self.codex_bin, "queue", "--thread", self.codex_thread, "--message", text]
+        try:
+            done = await anyio.run_process(argv, check=False)
+        except OSError as exc:
+            log.error("could not run %s: %s; %s stays unread", self.codex_bin, exc, message.id)
+            return
+        if done.returncode != 0:
+            log.error(
+                "codex queue failed for %s (exit %s): %s",
+                message.id,
+                done.returncode,
+                done.stderr.decode(errors="replace").strip()[-500:],
+            )
+            return
+        self.bus.mark_delivered(message.id, self.session)
+        log.info(
+            "queued %s from %s into codex thread %s redelivery=%s",
+            message.id,
+            message.sender,
+            self.codex_thread,
+            redelivery,
         )
 
     def revive(self, why: str) -> None:
@@ -538,7 +630,15 @@ class BusServer:
             self.confirm()
 
     async def wait_connected(self) -> None:
-        """Hold pushes until the connection is set up, then SETTLE_SECONDS more."""
+        """Hold pushes until the connection is set up, then SETTLE_SECONDS more.
+
+        Codex is ready as soon as its thread is known.
+        """
+        if self.cfg.channel == "codex":
+            while self.codex_thread is None:
+                await anyio.sleep(POLL_SECONDS)
+            log.info("delivery starts for codex thread %s", self.codex_thread)
+            return
         with anyio.move_on_after(TOOLS_LIST_TIMEOUT_SECONDS):
             await self.tools_listed.wait()
         if not self.tools_listed.is_set():
@@ -608,6 +708,7 @@ def build_server(app: BusServer) -> Server[Any, Any]:
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+        app.note_meta(server.request_context.meta)
         return await app.call_tool_waiting(name, arguments)
 
     return server
@@ -686,6 +787,7 @@ async def serve(cfg: Config) -> None:
         settle_seconds=float(os.environ.get("AGENT_BUS_SETTLE_SECONDS", SETTLE_SECONDS)),
         transcript=Transcript(config_dir, claude_session) if claude_session else None,
         confirm_seconds=float(os.environ.get("AGENT_BUS_CONFIRM_SECONDS", CONFIRM_SECONDS)),
+        codex_bin=os.environ.get("AGENT_BUS_CODEX_BIN") or "codex",
     )
     try:
         async with anyio.create_task_group() as hub_tasks:

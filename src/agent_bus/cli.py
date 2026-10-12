@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 import time
 from collections.abc import Sequence
@@ -59,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="store this agent's hub token, read from stdin, in a file only you can read",
     )
     sub.add_parser("sync", help="bring the local mirror of a hub up to date")
+
+    codex = sub.add_parser(
+        "codex",
+        help="start a Codex session on the bus as this agent",
+        description="Start Codex with this agent's bus server, for this session only. "
+        "Arguments after -- go to codex.",
+    )
+    codex.add_argument("codex_args", nargs=argparse.REMAINDER, help="arguments for codex")
 
     admin.add_parser(sub)
 
@@ -115,6 +125,53 @@ def _hub_token(cfg: config.Config) -> int:
     return 0
 
 
+CODEX_SERVER = "agent-bus"
+CODEX_OPENING = (
+    'You are on agent-bus as agent "{me}". Call its peers tool once, then tell me in one '
+    "line who else is on the bus."
+)
+
+
+def codex_argv(cfg: config.Config, codex_bin: str, extra: Sequence[str]) -> list[str]:
+    """The codex command line that puts this one session on the bus.
+
+    The server is configured with -c for this session only, so plain `codex`,
+    and `codex exec` runs started from a bus session, stay off the bus.
+    """
+    agent = cfg.require_agent()
+    env = {
+        "AGENT_BUS_SESSION": "1",
+        "AGENT_BUS_CHANNEL": "codex",
+        "AGENT_BUS_NAME": agent,
+        "AGENT_BUS_DIR": str(cfg.bus_dir),
+        "AGENT_BUS_CODEX_BIN": codex_bin,
+    }
+    if cfg.hub:
+        env["AGENT_BUS_HUB"] = cfg.hub
+    table = ", ".join(f"{key} = {json.dumps(value)}" for key, value in env.items())
+    server = f"mcp_servers.{CODEX_SERVER}"
+    overrides = {
+        "command": json.dumps(sys.executable),
+        "args": json.dumps(["-m", "agent_bus", "serve"]),
+        "env": f"{{ {table} }}",
+        "startup_timeout_sec": "60",
+        "tool_timeout_sec": "330",
+        "default_tools_approval_mode": '"approve"',
+    }
+    argv = [codex_bin, "--no-daemon"]
+    for key, value in overrides.items():
+        argv += ["-c", f"{server}.{key}={value}"]
+    rest = list(extra[1:] if extra[:1] == ["--"] else extra)
+    return [*argv, *rest, CODEX_OPENING.format(me=agent)]
+
+
+def _codex(cfg: config.Config, extra: Sequence[str]) -> int:
+    codex_bin = shutil.which("codex")
+    if codex_bin is None:
+        raise BusError("codex is not on PATH")
+    os.execv(codex_bin, codex_argv(cfg, codex_bin, extra))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -141,6 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "hub-token":
             return _hub_token(cfg)
+        if args.command == "codex":
+            return _codex(cfg, args.codex_args)
         backend = open_backend(cfg)
         if args.command == "tail":
             return _tail(backend.store, follow=args.follow, raw=args.json)

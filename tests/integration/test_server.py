@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -281,6 +282,42 @@ def test_inbox_waits_for_a_message_that_arrives_during_the_call(
     result = codex.wait_for(lambda m: m.get("id") == request_id)["result"]
     assert time.monotonic() - started < 5
     assert [m["id"] for m in tool_json(result)] == [msg.id]
+
+
+def test_codex_gets_each_message_queued_into_its_thread(
+    spawn: Spawn, bus_dir: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "codex-calls.jsonl"
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    fake.chmod(0o755)
+    codex = spawn({**ON_BUS, "AGENT_BUS_CHANNEL": "codex", "AGENT_BUS_CODEX_BIN": str(fake)})
+    assert set(Registry(Store(bus_dir)).live()) == {"bob"}
+    early = _alice(bus_dir).send("bob", "before codex said where it is")
+    time.sleep(1)
+    assert not calls.exists(), "queued before the thread was known"
+
+    meta = {"x-codex-turn-metadata": {"thread_id": "thread-1"}, "threadId": "thread-1"}
+    codex.request("tools/call", {"name": "peers", "arguments": {}, "_meta": meta})
+    late = _alice(bus_dir).send("bob", "after")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and len(_lines(calls)) < 2:
+        time.sleep(0.2)
+    queued = [json.loads(line) for line in _lines(calls)]
+    assert [q[:4] for q in queued] == [["queue", "--thread", "thread-1", "--message"]] * 2
+    assert f'msg_id="{early.id}"' in queued[0][4]
+    assert 'redelivery="true"' in queued[0][4]
+    assert queued[1][4].endswith("\nafter\n</agent-bus-message>")
+    delivered = {e.id for e in Store(bus_dir).read_all().events if isinstance(e, DeliveredEvent)}
+    assert delivered == {early.id, late.id}
+
+
+def _lines(path: Path) -> list[str]:
+    return path.read_text().splitlines() if path.exists() else []
 
 
 def test_sigterm_releases_the_channel_and_logs_stop(spawn: Spawn, bus_dir: Path) -> None:

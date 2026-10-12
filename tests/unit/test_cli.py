@@ -91,3 +91,28 @@ def test_errors_go_to_stderr_with_exit_1(
     assert "yourself" in capsys.readouterr().err
     assert _run(tmp_path, "inbox") == 1
     assert "agent name is not set" in capsys.readouterr().err
+
+
+def test_codex_wrapper_puts_only_this_session_on_the_bus(tmp_path: Path) -> None:
+    from agent_bus import config
+    from agent_bus.cli import codex_argv
+
+    cfg = config.load(
+        {"AGENT_BUS_NAME": "codex", "AGENT_BUS_HUB": "https://hub.example"},
+        bus_dir=str(tmp_path),
+    )
+    argv = codex_argv(cfg, "/bin/codex", ["--", "-m", "gpt-x"])
+    assert argv[:2] == ["/bin/codex", "--no-daemon"]
+    overrides = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "-c")
+    env = overrides["mcp_servers.agent-bus.env"]
+    for pair in (
+        'AGENT_BUS_SESSION = "1"',
+        'AGENT_BUS_CHANNEL = "codex"',
+        'AGENT_BUS_NAME = "codex"',
+        'AGENT_BUS_HUB = "https://hub.example"',
+        'AGENT_BUS_CODEX_BIN = "/bin/codex"',
+    ):
+        assert pair in env
+    assert overrides["mcp_servers.agent-bus.args"] == '["-m", "agent_bus", "serve"]'
+    assert argv[-3:-1] == ["-m", "gpt-x"]
+    assert 'agent "codex"' in argv[-1]

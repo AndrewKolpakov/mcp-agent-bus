@@ -105,8 +105,9 @@ def test_hub_must_be_https(url: str) -> None:
         config.load({"AGENT_BUS_HUB": url})
 
 
-def test_channel_is_on_unless_turned_off() -> None:
-    assert config.load({}).channel is True
-    assert config.load({"AGENT_BUS_CHANNEL": "0"}).channel is False
+def test_channel_is_claude_unless_set() -> None:
+    assert config.load({}).channel == "claude"
+    assert config.load({"AGENT_BUS_CHANNEL": "0"}).channel == "inbox"
+    assert config.load({"AGENT_BUS_CHANNEL": "codex"}).channel == "codex"
     with pytest.raises(ValueError, match="AGENT_BUS_CHANNEL"):
         config.load({"AGENT_BUS_CHANNEL": "no"})
