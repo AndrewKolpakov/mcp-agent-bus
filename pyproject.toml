@@ -1,6 +1,6 @@
 [project]
 name = "agent-bus"
-version = "0.2.0"
+version = "1.0.0"
 description = "Message bus between Claude Code sessions on different accounts: an MCP channel, hooks and a skill"
 readme = "README.md"
 authors = [
