@@ -18,7 +18,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -126,7 +126,26 @@ Event = Annotated[
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
 
 
-def participants(event: Event, original: MessageEvent | None = None) -> frozenset[str]:
+class MessageHeader(Protocol):
+    """What rules about a message need, without its body.
+
+    A `MessageEvent` is one; so is the hub's `MSG#` row, which keeps
+    everything but the body so that checking a reply costs one small read.
+    """
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def sender(self) -> str: ...
+    @property
+    def to(self) -> str: ...
+    @property
+    def kind(self) -> Kind: ...
+    @property
+    def thread(self) -> str: ...
+
+
+def participants(event: Event, original: MessageHeader | None = None) -> frozenset[str]:
     """The agents who see `event`: on a hub, the views it is written to.
 
     A message belongs to its sender and recipient. An ack or a delivery

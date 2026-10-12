@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: agent-bus hub - one table, one Lambda, HTTP API and WebSocket API (PLAN.md, v2)
+
+Parameters:
+  Name:
+    Type: String
+    Default: agent-bus-dev
+  RateLimit:
+    Type: Number
+    Default: 30
+    Description: Messages per agent pair per window before the loop guard refuses
+  RateWindowSeconds:
+    Type: Number
+    Default: 300
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref Name
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Name}-hub
+      RetentionInDays: !Ref LogRetentionDays
+
+  WsAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /agent-bus/${Name}/ws-access
+      RetentionInDays: !Ref LogRetentionDays
+
+  HttpAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /agent-bus/${Name}/http-access
+      RetentionInDays: !Ref LogRetentionDays
+
+  Hub:
+    Type: AWS::Serverless::Function
+    DependsOn: FunctionLogs
+    Properties:
+      FunctionName: !Sub ${Name}-hub
+      CodeUri: build/
+      Handler: agent_bus.hub.app.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 20
+      Environment:
+        Variables:
+          TABLE: !Ref Table
+          RATE_LIMIT: !Ref RateLimit
+          RATE_WINDOW_SECONDS: !Ref RateWindowSeconds
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/*
+
+  InvokeFromApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Hub
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- HTTP API: one catch-all route behind a Lambda authorizer -----------------
+  # The authorizer caches its answer per token for 60 s, which is how long a
+  # revoked token keeps working (stage 7, Q8).
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Name}-http
+      ProtocolType: HTTP
+
+  HttpAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: token
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+      AuthorizerPayloadFormatVersion: "2.0"
+      EnableSimpleResponses: true
+      IdentitySource: [$request.header.Authorization]
+      AuthorizerResultTtlInSeconds: 60
+
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt Hub.Arn
+      PayloadFormatVersion: "2.0"
+
+  HttpRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: ANY /{proxy+}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref HttpAuthorizer
+      Target: !Sub integrations/${HttpIntegration}
+
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      # Bounds what a valid token can cost the account.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status","path":"$context.path","authError":"$context.authorizer.error","latency":"$context.responseLatency"}'
+
+  # --- WebSocket API --------------------------------------------------------------
+  # The token rides in Sec-WebSocket-Protocol, so the authorizer has no
+  # identity source to cache by and checks every connect.
+
+  WsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Name}-ws
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WsAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref WsApi
+      Name: token
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+
+  WsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Hub.Arn}/invocations
+
+  WsConnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $connect
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WsAuthorizer
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDisconnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${WsIntegration}
+
+  WsPing:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: ping
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDefault:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $default
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [WsConnect, WsDisconnect, WsPing, WsDefault]
+    Properties:
+      ApiId: !Ref WsApi
+
+  WsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WsApi
+      StageName: bus
+      DeploymentId: !Ref WsDeployment
+      # No execution logs: with data trace they would record message frames.
+      DefaultRouteSettings:
+        LoggingLevel: "OFF"
+        DataTraceEnabled: false
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+      AccessLogSettings:
+        DestinationArn: !GetAtt WsAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","eventType":"$context.eventType","route":"$context.routeKey","connectionId":"$context.connectionId","status":"$context.status","disconnectStatus":"$context.disconnectStatusCode","disconnectReason":"$context.disconnectReason","authError":"$context.authorizer.error"}'
+
+Outputs:
+  HttpUrl:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  WsUrl:
+    Value: !Sub ${WsApi.ApiEndpoint}/bus
+  WsApiId:
+    Value: !Ref WsApi
+  TableName:
+    Value: !Ref Table

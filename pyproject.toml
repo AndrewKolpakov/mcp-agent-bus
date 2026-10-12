@@ -26,6 +26,16 @@ dev = [
     "ruff>=0.13",
     "types-pyyaml>=6.0.12.20260906",
 ]
+# The hub Lambda (src/agent_bus/hub): boto3 comes with the Lambda runtime,
+# so it is a group here and never a dependency of the client.
+hub = [
+    "boto3>=1.40",
+    "boto3-stubs[apigatewaymanagementapi,dynamodb]>=1.40",
+    "moto[dynamodb]>=5.1",
+]
+
+[tool.uv]
+default-groups = ["dev", "hub"]
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]

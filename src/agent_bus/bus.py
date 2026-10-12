@@ -12,6 +12,7 @@ from agent_bus.models import (
     HumanTurnEvent,
     Kind,
     MessageEvent,
+    MessageHeader,
     check_agent_name,
     new_id,
     now,
@@ -42,7 +43,7 @@ ALLOWED_REPLIES: dict[Kind, frozenset[Kind]] = {
 }
 
 
-def check_reply(original: MessageEvent, kind: Kind) -> None:
+def check_reply(original: MessageHeader, kind: Kind) -> None:
     """Refuse answering a message whose kind ends its chain with anything but what it allows."""
     allowed = ALLOWED_REPLIES.get(original.kind)
     if allowed is not None and kind not in allowed:
@@ -50,6 +51,16 @@ def check_reply(original: MessageEvent, kind: Kind) -> None:
         raise BusError(
             f"message {original.id} is kind={original.kind!r}, which ends its chain: "
             f"do not answer it, ack it instead{hint}"
+        )
+
+
+def check_rate(recent: int, me: str, to: str, *, limit: int, window: float) -> None:
+    """Refuse a message once `recent` messages between the pair fill the window."""
+    if recent >= limit:
+        raise RateLimitError(
+            f"{recent} messages between {me} and {to} in the last "
+            f"{window:g}s (limit {limit}); this looks like a loop. "
+            "Send one message with kind='await_human' and wait for a human"
         )
 
 
@@ -117,12 +128,7 @@ class Bus:
             recent = state.messages_between(
                 self.me, to, since=now() - timedelta(seconds=self.rate_window)
             )
-            if recent >= self.rate_limit:
-                raise RateLimitError(
-                    f"{recent} messages between {self.me} and {to} in the last "
-                    f"{self.rate_window:g}s (limit {self.rate_limit}); this looks like a loop. "
-                    "Send one message with kind='await_human' and wait for a human"
-                )
+            check_rate(recent, self.me, to, limit=self.rate_limit, window=self.rate_window)
 
         message = self.store.append(
             MessageEvent(
