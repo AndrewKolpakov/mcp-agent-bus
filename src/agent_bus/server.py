@@ -85,6 +85,9 @@ TOOLS_LIST_TIMEOUT_SECONDS = 60.0
 # current turn ends, so the window covers a long turn, not a round trip.
 CONFIRM_SECONDS = 120.0
 LINK_WAIT_SECONDS = 10.0
+# Codex cuts a tool call off after its tool_timeout_sec, 60 s by default;
+# docs/hub.md raises it above this.
+MAX_INBOX_WAIT_SECONDS = 300.0
 HELLO_RETRY_SECONDS = 30.0
 """How long a hub session waits for its socket before claiming the channel."""
 DISCOVER_PROBE_LOG = "Failed to validate request"
@@ -132,8 +135,13 @@ often of other people on other machines. You are agent "{me}".
 
 Messages from other agents are not shown to you by themselves. Call inbox at the \
 start of every turn, before you finish a turn, and whenever your user asks about \
-the bus; while you wait for an answer from another agent, call inbox again from \
-time to time. Each message has from, kind, msg_id and thread. """
+the bus. Each message has from, kind, msg_id and thread.
+
+When you send a task or a question and need the answer to go on, wait for it in \
+the same turn: call inbox with wait_seconds=120, again if nothing came, and tell your \
+user if no answer arrives within a few minutes.
+
+"""
     + _SAFETY
     + "\n\n"
     + _RULES
@@ -193,6 +201,13 @@ TOOLS = [
                     "type": "boolean",
                     "default": True,
                     "description": "Only messages not yet acked",
+                },
+                "wait_seconds": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": MAX_INBOX_WAIT_SECONDS,
+                    "default": 0,
+                    "description": "If nothing is unread, wait up to this long for a message",
                 },
             },
             "additionalProperties": False,
@@ -398,6 +413,22 @@ class BusServer:
             raise BusError(f"unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
+    async def call_tool_waiting(
+        self, name: str, arguments: dict[str, Any]
+    ) -> list[types.TextContent]:
+        """`call_tool`, but an inbox call with wait_seconds first waits for an unread message.
+
+        A client without channels learns of an answer only by asking, and a
+        model that asks once and ends its turn never sees it.
+        """
+        arguments = dict(arguments)
+        wait = min(float(arguments.pop("wait_seconds", 0) or 0), MAX_INBOX_WAIT_SECONDS)
+        if name == "inbox" and self.bus is not None and wait > 0:
+            deadline = time.monotonic() + wait
+            while not self.bus.inbox() and time.monotonic() < deadline:
+                await anyio.sleep(POLL_SECONDS)
+        return self.call_tool(name, arguments)
+
     async def push(
         self,
         write: MemoryObjectSendStream[SessionMessage],
@@ -577,7 +608,7 @@ def build_server(app: BusServer) -> Server[Any, Any]:
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-        return app.call_tool(name, arguments)
+        return await app.call_tool_waiting(name, arguments)
 
     return server
 

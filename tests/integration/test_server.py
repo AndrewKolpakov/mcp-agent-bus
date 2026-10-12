@@ -258,6 +258,31 @@ def test_a_session_without_channels_reads_inbox_and_never_counts_delivered(
     assert Bus(Store(bus_dir), "alice").peers()[0].unread_by_them == 0
 
 
+def test_inbox_waits_for_a_message_that_arrives_during_the_call(
+    spawn: Spawn, bus_dir: Path
+) -> None:
+    codex = spawn({**ON_BUS, "AGENT_BUS_CHANNEL": "0"})
+    started = time.monotonic()
+    assert tool_json(codex.call("inbox", {"wait_seconds": 1})) == []
+    assert time.monotonic() - started >= 1
+
+    request_id = 900
+    codex.send(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": "inbox", "arguments": {"wait_seconds": 30}},
+        }
+    )
+    time.sleep(1)
+    msg = _alice(bus_dir).send("bob", "late answer")
+    started = time.monotonic()
+    result = codex.wait_for(lambda m: m.get("id") == request_id)["result"]
+    assert time.monotonic() - started < 5
+    assert [m["id"] for m in tool_json(result)] == [msg.id]
+
+
 def test_sigterm_releases_the_channel_and_logs_stop(spawn: Spawn, bus_dir: Path) -> None:
     server = spawn()
     registry = Registry(Store(bus_dir))
