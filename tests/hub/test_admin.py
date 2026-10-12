@@ -105,3 +105,13 @@ def test_tail_prints_the_whole_log(table: Table, capsys: pytest.CaptureFixture[s
     assert "m2" in out
     assert "m0" not in out
     assert [e.seq for e in table.log_after(1)] == [2, 3]
+
+
+def test_a_team_without_members_leaves_the_list(
+    table: Table, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(table, "agent", "add", "alice", "--team", "core")
+    run(table, "member", "remove", "core", "alice")
+    capsys.readouterr()
+    run(table, "team", "list")
+    assert capsys.readouterr().out == ""

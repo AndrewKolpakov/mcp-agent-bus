@@ -320,6 +320,8 @@ class Table:
                 },
             ]
         )
+        if not self.members(team):
+            self.client.delete_item(TableName=self.name, Key={"pk": _s("TEAMS"), "sk": _s(team)})
 
     def teams(self, agent: str) -> set[str]:
         return {_str(i, "sk").removeprefix("TEAM#") for i in self._query(f"AGENT#{agent}", "TEAM#")}

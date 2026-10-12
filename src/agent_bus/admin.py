@@ -89,9 +89,11 @@ def open_table(args: argparse.Namespace) -> Table:
 
 
 def run(args: argparse.Namespace, table: Table | None = None) -> int:
+    from botocore.exceptions import BotoCoreError, ClientError
+
     try:
         return _run(args, table or open_table(args))
-    except (LookupError, ValueError) as exc:
+    except (LookupError, ValueError, BotoCoreError, ClientError) as exc:
         print(f"agent-bus admin: {exc}", file=sys.stderr)
         return 1
 

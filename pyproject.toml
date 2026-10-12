@@ -20,7 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # `agent-bus admin` writes a hub's table with the owner's AWS credentials.
-admin = ["boto3>=1.40"]
+# crt: credentials from `aws login` need it.
+admin = ["boto3[crt]>=1.40"]
 
 [project.scripts]
 agent-bus = "agent_bus.cli:main"
@@ -38,7 +39,7 @@ dev = [
 # so it is a group here and never a dependency of the client. It rides in
 # dev, so the plugin's `uv run --no-dev` leaves it out.
 hub = [
-    "boto3>=1.40",
+    "boto3[crt]>=1.40",
     "boto3-stubs[apigatewaymanagementapi,dynamodb]>=1.40",
     "moto[dynamodb]>=5.1",
 ]
