@@ -1,8 +1,10 @@
 """`agent-bus admin`: agents, tokens and teams on a hub, run by its owner.
 
 It writes the hub's table directly with the caller's AWS credentials, so
-the hub's API has no admin routes to protect. A token is printed once, to
-stdout, when it is made; the table keeps only its hash.
+the hub's API has no admin routes to protect. A token is printed once, when
+it is made, together with everything else the agent's owner needs: the
+hub's address, the agent's name and the command that stores the token on
+their machine. The table keeps only the token's hash.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +21,14 @@ if TYPE_CHECKING:
 
 STACK_ENV = "AGENT_BUS_ADMIN_STACK"
 FOLLOW_SECONDS = 2.0
+INSTALL_FROM = "git+https://github.com/AndrewKolpakov/mcp-agent-bus"
+
+
+@dataclass(frozen=True)
+class HubRef:
+    table: Table
+    url: str | None
+    """The hub's HTTP address; known from a stack, or from --hub-url with --table."""
 
 
 def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -27,6 +38,7 @@ def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     where = admin.add_mutually_exclusive_group()
     where.add_argument("--stack", help=f"hub stack name (default: ${STACK_ENV})")
     where.add_argument("--table", help="hub table name, instead of a stack")
+    admin.add_argument("--hub-url", help="the hub's https address, when given --table")
     groups = admin.add_subparsers(dest="group", metavar="<group>", required=True)
 
     agent = groups.add_parser("agent", help="agents").add_subparsers(
@@ -35,6 +47,7 @@ def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     add = agent.add_parser("add", help="register an agent and print its token")
     add.add_argument("name")
     add.add_argument("--team", action="append", default=[], help="also add it to this team")
+    add.add_argument("--token-only", action="store_true", help="print just the token, for a pipe")
     agent.add_parser("list", help="agents and their teams")
     remove = agent.add_parser("remove", help="delete an agent, its token, teams and view")
     remove.add_argument("name")
@@ -43,9 +56,9 @@ def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     token = groups.add_parser("token", help="tokens").add_subparsers(
         dest="action", metavar="<action>", required=True
     )
-    token.add_parser("rotate", help="issue a new token; the old one stops working").add_argument(
-        "name"
-    )
+    rotate = token.add_parser("rotate", help="issue a new token; the old one stops working")
+    rotate.add_argument("name")
+    rotate.add_argument("--token-only", action="store_true", help="print just the token")
     token.add_parser("revoke", help="leave the agent without a token").add_argument("name")
 
     team = groups.add_parser("team", help="teams").add_subparsers(
@@ -68,7 +81,7 @@ def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     tail.set_defaults(action="tail")
 
 
-def open_table(args: argparse.Namespace) -> Table:
+def open_hub(args: argparse.Namespace) -> HubRef:
     try:
         import boto3
     except ImportError:
@@ -79,39 +92,53 @@ def open_table(args: argparse.Namespace) -> Table:
     from agent_bus.hub.table import Table
 
     if args.table:
-        return Table(args.table)
+        return HubRef(Table(args.table), args.hub_url)
     stack = args.stack or os.environ.get(STACK_ENV)
     if not stack:
         raise SystemExit(f"agent-bus admin: name the hub with --stack, --table or ${STACK_ENV}")
     found = boto3.client("cloudformation").describe_stacks(StackName=stack)["Stacks"][0]
     outputs = {o["OutputKey"]: o["OutputValue"] for o in found.get("Outputs", [])}
-    return Table(outputs["TableName"])
+    return HubRef(Table(outputs["TableName"]), outputs.get("HttpUrl"))
 
 
-def run(args: argparse.Namespace, table: Table | None = None) -> int:
+def run(args: argparse.Namespace, hub: HubRef | None = None) -> int:
     from botocore.exceptions import BotoCoreError, ClientError
 
     try:
-        return _run(args, table or open_table(args))
+        return _run(args, hub or open_hub(args))
     except (LookupError, ValueError, BotoCoreError, ClientError) as exc:
         print(f"agent-bus admin: {exc}", file=sys.stderr)
         return 1
 
 
-def _run(args: argparse.Namespace, table: Table) -> int:
+def handover(name: str, token: str, url: str | None) -> str:
+    """Everything the agent's owner needs, in one block to pass on privately."""
+    hub = url or "<hub address>"
+    lines = [
+        f"hub:   {hub}",
+        f"agent: {name}",
+        f"token: {token}",
+        "",
+        "On the agent's machine, store the token (paste it, then Ctrl-D):",
+        f"  AGENT_BUS_HUB={hub} AGENT_BUS_NAME={name} \\",
+        f"    uvx --from {INSTALL_FROM} agent-bus hub-token",
+        f"Then set the plugin's hub_url to {hub} and agent_name to {name}.",
+    ]
+    return "\n".join(lines)
+
+
+def _run(args: argparse.Namespace, hub: HubRef) -> int:
     from agent_bus.cli import _dump, format_event
+
+    table = hub.table
 
     what = (args.group, args.action)
     if what == ("agent", "add"):
         token = table.create_agent(args.name)
         for team in args.team:
             table.add_member(team, args.name)
-        print(token)
-        print(
-            f"agent {args.name} created; the token above is shown once."
-            " Hand it over privately: `agent-bus hub-token` reads it from stdin.",
-            file=sys.stderr,
-        )
+        print(token if args.token_only else handover(args.name, token, hub.url))
+        print(f"agent {args.name} created; the token is shown only now", file=sys.stderr)
     elif what == ("agent", "list"):
         for name in table.agents():
             print(f"{name} teams={','.join(sorted(table.teams(name))) or '-'}")
@@ -125,10 +152,11 @@ def _run(args: argparse.Namespace, table: Table) -> int:
         table.remove_agent(args.name)
         print(f"removed {args.name}")
     elif what == ("token", "rotate"):
-        print(table.rotate_token(args.name))
+        token = table.rotate_token(args.name)
+        print(token if args.token_only else handover(args.name, token, hub.url))
         print(
-            f"new token for {args.name}; the old one is refused now on WebSocket"
-            " and within 60 s over HTTP",
+            f"new token for {args.name}, shown only now; the old one is refused now on"
+            " WebSocket and within 60 s over HTTP",
             file=sys.stderr,
         )
     elif what == ("token", "revoke"):

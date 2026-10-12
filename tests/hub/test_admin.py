@@ -13,15 +13,23 @@ from agent_bus.hub.table import Table
 __all__ = ["table"]  # fixtures
 
 
+URL = "https://hub.example"
+
+
 def run(table: Table, *argv: str) -> int:
-    return admin.run(build_parser().parse_args(["admin", *argv]), table)
+    args = build_parser().parse_args(["admin", *argv])
+    return admin.run(args, admin.HubRef(table, URL))
+
+
+def token_of(out: str) -> str:
+    return next(line.split()[-1] for line in out.splitlines() if line.startswith("token:"))
 
 
 def test_an_agent_added_to_a_team_can_write_to_teammates(
     table: Table, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert run(table, "agent", "add", "alice", "--team", "core") == 0
-    alice_token = capsys.readouterr().out.strip()
+    alice_token = token_of(capsys.readouterr().out)
     assert run(table, "agent", "add", "bob") == 0
     capsys.readouterr()
     assert table.agent_for_token(alice_token) == "alice"
@@ -42,9 +50,9 @@ def test_a_token_is_printed_once_and_only_its_hash_is_kept(
 ) -> None:
     run(table, "agent", "add", "alice")
     out = capsys.readouterr()
-    token = out.out.strip()
+    token = token_of(out.out)
     assert token.startswith("ab_")
-    assert "shown once" in out.err
+    assert "shown only now" in out.err
     items = table.client.scan(TableName=table.name)["Items"]
     assert token not in repr(items)
 
@@ -53,16 +61,16 @@ def test_rotate_and_revoke_replace_and_drop_the_token(
     table: Table, capsys: pytest.CaptureFixture[str]
 ) -> None:
     run(table, "agent", "add", "alice")
-    first = capsys.readouterr().out.strip()
+    first = token_of(capsys.readouterr().out)
     run(table, "token", "rotate", "alice")
-    second = capsys.readouterr().out.strip()
+    second = token_of(capsys.readouterr().out)
     assert table.agent_for_token(first) is None
     assert table.agent_for_token(second) == "alice"
     run(table, "token", "revoke", "alice")
     assert table.agent_for_token(second) is None
     run(table, "token", "revoke", "alice")
     assert "had no token" in capsys.readouterr().out
-    run(table, "token", "rotate", "alice")
+    run(table, "token", "rotate", "alice", "--token-only")
     assert table.agent_for_token(capsys.readouterr().out.strip()) == "alice"
 
 
@@ -115,3 +123,22 @@ def test_a_team_without_members_leaves_the_list(
     capsys.readouterr()
     run(table, "team", "list")
     assert capsys.readouterr().out == ""
+
+
+def test_add_prints_everything_the_agent_owner_needs(
+    table: Table, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(table, "agent", "add", "legion")
+    out = capsys.readouterr().out
+    token = token_of(out)
+    assert f"hub:   {URL}" in out
+    assert "agent: legion" in out
+    assert f"AGENT_BUS_HUB={URL} AGENT_BUS_NAME=legion" in out
+    assert "agent-bus hub-token" in out
+    assert table.agent_for_token(token) == "legion"
+    run(table, "agent", "add", "pipe", "--token-only")
+    assert capsys.readouterr().out.strip().startswith("ab_")
+
+
+def test_handover_without_a_known_address_says_so() -> None:
+    assert "hub:   <hub address>" in admin.handover("legion", "ab_x", None)
