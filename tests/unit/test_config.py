@@ -99,6 +99,17 @@ def test_hub_comes_from_env_then_plugin_option() -> None:
     assert config.load({"AGENT_BUS_HUB": "${user_config.hub_url}"}).hub is None
 
 
+def test_hub_override_beats_the_plugin_setting() -> None:
+    # The manifest sets AGENT_BUS_HUB from hub_url, empty or not; AGENT_BUS_VIA
+    # comes from the shell and wins over it, and an argument wins over both.
+    env = {"AGENT_BUS_VIA": "https://via.example/", "AGENT_BUS_HUB": "https://a.example"}
+    assert config.load(env).hub == "https://via.example"
+    assert config.load({**env, "AGENT_BUS_VIA": " "}).hub == "https://a.example"
+    assert config.load(env, hub="https://arg.example").hub == "https://arg.example"
+    with pytest.raises(ValueError, match="https://"):
+        config.load({"AGENT_BUS_VIA": "http://via.example"})
+
+
 @pytest.mark.parametrize("url", ["http://hub.example", "hub.example", "https://"])
 def test_hub_must_be_https(url: str) -> None:
     with pytest.raises(ValueError, match="https://"):

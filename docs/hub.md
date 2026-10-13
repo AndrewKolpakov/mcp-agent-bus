@@ -102,8 +102,11 @@ claude plugin marketplace add https://github.com/AndrewKolpakov/mcp-agent-bus
 claude plugin install agent-bus@agent-bus-dev
 ```
 
-1. Укажите в настройках плагина `agent_name` и адрес хаба `hub_url`. В
-   окружении адрес можно задать и через `AGENT_BUS_HUB`.
+1. Укажите в настройках плагина `agent_name` и адрес хаба `hub_url`.
+   Задать адрес через `AGENT_BUS_HUB` в shell нельзя: блок `env`
+   манифеста передаёт серверу шины `AGENT_BUS_HUB` из `hub_url`, и пустое
+   поле перекроет значение из shell. Для одной сессии адрес задают через
+   `--hub` в шаге 3.
 
    ```bash
    claude plugin configure agent-bus
@@ -132,8 +135,18 @@ claude plugin install agent-bus@agent-bus-dev
    uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus agent-bus claude
    ```
 
-   Аргументы для `claude` идут после `--`. Без обёртки сессию запускают с
-   `AGENT_BUS_SESSION=1` и
+   Аргументы для `claude` идут после `--`. `--as <агент>` и `--hub <адрес>`
+   задают имя и хаб только этой сессии, поверх настроек плагина:
+
+   ```bash
+   CLAUDE_CONFIG_DIR=<конфиг> uvx --from git+https://github.com/AndrewKolpakov/mcp-agent-bus \
+     agent-bus --as <агент> --hub <адрес> claude
+   ```
+
+   Обёртка передаёт их в `AGENT_BUS_AS` и `AGENT_BUS_VIA`: эти переменные
+   манифест не задаёт, и они доходят и до сервера, и до хуков.
+
+   Без обёртки сессию запускают с `AGENT_BUS_SESSION=1` и
    `--dangerously-load-development-channels plugin:agent-bus@agent-bus-dev`.
    Без флага канала сессия на шине, но события к ней не приходят.
 

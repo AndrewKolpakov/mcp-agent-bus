@@ -35,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="agent",
         help="act as this agent (default: $AGENT_BUS_AS, then $AGENT_BUS_NAME)",
     )
+    parser.add_argument(
+        "--hub",
+        help="use this hub's https address (default: $AGENT_BUS_VIA, then $AGENT_BUS_HUB)",
+    )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     send = sub.add_parser("send", help="send a message to another agent")
@@ -68,8 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
         "claude",
         help="start a Claude Code session on the bus",
         description="Start Claude Code on the bus with the channel loaded, keeping the "
-        "current environment (CLAUDE_CONFIG_DIR and the rest). --as picks the agent for "
-        "this session. Arguments after -- go to claude.",
+        "current environment (CLAUDE_CONFIG_DIR and the rest). --as and --hub pick the "
+        "agent and the hub for this session. Arguments after -- go to claude.",
     )
     claude.add_argument("claude_args", nargs=argparse.REMAINDER, help="arguments for claude")
 
@@ -170,7 +174,7 @@ def claude_argv(claude_bin: str, extra: Sequence[str]) -> list[str]:
     ]
 
 
-def _claude(agent: str | None, extra: Sequence[str]) -> int:
+def _claude(agent: str | None, hub: str | None, extra: Sequence[str]) -> int:
     env = session_env(os.environ)
     claude_bin = shutil.which("claude", path=env.get("PATH"))
     if claude_bin is None:
@@ -180,6 +184,9 @@ def _claude(agent: str | None, extra: Sequence[str]) -> int:
         # AGENT_BUS_AS, not AGENT_BUS_NAME: the manifest's env block sets the
         # latter for the server from agent_name, over the shell's value.
         env["AGENT_BUS_AS"] = agent
+    if hub:
+        # AGENT_BUS_VIA, not AGENT_BUS_HUB, for the same reason with hub_url.
+        env["AGENT_BUS_VIA"] = hub
     os.execve(claude_bin, claude_argv(claude_bin, extra), env)
 
 
@@ -245,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The hub's owner, not an agent: no agent name or bus config needed.
         return admin.run(args)
     try:
-        cfg = config.load(bus_dir=args.bus_dir, agent=args.agent)
+        cfg = config.load(bus_dir=args.bus_dir, agent=args.agent, hub=args.hub)
         if args.command == "serve":
             # The server opens the backend itself and reports a broken hub
             # setup to the session instead of failing to start.
@@ -260,7 +267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "codex":
             return _codex(cfg, args.codex_args)
         if args.command == "claude":
-            return _claude(args.agent, args.claude_args)
+            return _claude(args.agent, cfg.hub if args.hub else None, args.claude_args)
         backend = open_backend(cfg)
         if args.command == "tail":
             return _tail(backend.store, follow=args.follow, raw=args.json)

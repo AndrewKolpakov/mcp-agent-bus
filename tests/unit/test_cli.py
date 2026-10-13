@@ -138,7 +138,19 @@ def test_claude_wrapper_keeps_the_environment_and_loads_the_channel(tmp_path: Pa
         "UV_PROJECT_ENVIRONMENT": sys.prefix,
     }
     done = subprocess.run(
-        [sys.executable, "-m", "agent_bus", "--as", "zed", "claude", "--", "--model", "sonnet"],
+        [
+            sys.executable,
+            "-m",
+            "agent_bus",
+            "--as",
+            "zed",
+            "--hub",
+            "https://hub.example/",
+            "claude",
+            "--",
+            "--model",
+            "sonnet",
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -157,6 +169,7 @@ def test_claude_wrapper_keeps_the_environment_and_loads_the_channel(tmp_path: Pa
     assert run["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/second"
     assert run["env"]["AGENT_BUS_SESSION"] == "1"
     assert run["env"]["AGENT_BUS_AS"] == "zed"
+    assert run["env"]["AGENT_BUS_VIA"] == "https://hub.example"
     assert "VIRTUAL_ENV" not in run["env"]
     assert "UV_PROJECT_ENVIRONMENT" not in run["env"]
     assert venv_bin not in run["env"]["PATH"].split(os.pathsep)

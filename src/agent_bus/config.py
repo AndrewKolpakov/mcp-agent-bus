@@ -17,7 +17,9 @@ with the inbox tool; `codex` queues each one into the Codex session with
 `codex queue`, which `agent-bus codex` sets up.
 
 `hub` is the hub's HTTP address (PLAN.md, v2). Set, it replaces the local
-directory as the bus; the token comes from a file, never from here.
+directory as the bus; the token comes from a file, never from here. Like the
+name, it has a per-session override ahead of `AGENT_BUS_HUB`: `AGENT_BUS_VIA`,
+which the manifest's `env` block does not set from `hub_url`.
 """
 
 from __future__ import annotations
@@ -76,6 +78,7 @@ def load(
     *,
     bus_dir: str | None = None,
     agent: str | None = None,
+    hub: str | None = None,
 ) -> Config:
     env = os.environ if env is None else env
     raw_dir = bus_dir or _pick(env, "AGENT_BUS_DIR", "CLAUDE_PLUGIN_OPTION_BUS_DIR")
@@ -84,7 +87,7 @@ def load(
     )
     raw_limit = _pick(env, "AGENT_BUS_RATE_LIMIT", "CLAUDE_PLUGIN_OPTION_RATE_LIMIT")
     raw_window = _pick(env, "AGENT_BUS_RATE_WINDOW", "CLAUDE_PLUGIN_OPTION_RATE_WINDOW_SECONDS")
-    raw_hub = _pick(env, "AGENT_BUS_HUB", "CLAUDE_PLUGIN_OPTION_HUB_URL")
+    raw_hub = hub or _pick(env, "AGENT_BUS_VIA", "AGENT_BUS_HUB", "CLAUDE_PLUGIN_OPTION_HUB_URL")
     raw_channel = (_pick(env, "AGENT_BUS_CHANNEL") or "1").lower()
     if raw_channel not in CHANNELS:
         raise ValueError(f"AGENT_BUS_CHANNEL must be 1, 0 or codex, got {raw_channel!r}")
