@@ -60,6 +60,7 @@ import logging
 import os
 import signal
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -406,12 +407,21 @@ class BusServer:
         self.link.ws_url = str(hello.get("ws") or "")
 
     async def keep_link(self) -> None:
-        """Run the hub socket, first asking the hub where it is if the start could not."""
-        while self.link is not None and not self.link.ws_url:
-            await anyio.sleep(HELLO_RETRY_SECONDS)
-            await self.check_hub()
-        if self.link is not None:
-            await self.link.run()
+        """Run the hub socket, first asking the hub where it is if the start could not.
+
+        An error the link does not handle starts it again: the link only
+        keeps the session fresh, and must not end it.
+        """
+        while self.link is not None:
+            try:
+                while self.link is not None and not self.link.ws_url:
+                    await anyio.sleep(HELLO_RETRY_SECONDS)
+                    await self.check_hub()
+                if self.link is not None:
+                    await self.link.run()
+            except Exception:
+                log.exception("hub link failed; starting it again in %ss", HELLO_RETRY_SECONDS)
+                await anyio.sleep(HELLO_RETRY_SECONDS)
 
     def go_off_bus(self, problem: str) -> None:
         log.error("off the bus: %s", problem)
@@ -764,6 +774,25 @@ async def exit_on_signal(app: BusServer) -> None:
             os._exit(0)
 
 
+async def exit_on_error(app: BusServer, task: Callable[..., Awaitable[None]], *args: Any) -> None:
+    """Run a background task; an error it does not handle ends the server at once.
+
+    Left to the task group, the error would cancel every other task and then
+    wait on the SDK's stdin reader thread, which a cancel cannot interrupt:
+    the server sat with no heartbeat until the client's next request, then
+    died on it (2026-10-19: four sessions deaf for 14 to 160 minutes). The
+    traceback also reached only stderr, which nothing keeps.
+    """
+    try:
+        await task(*args)
+    except Exception:
+        log.exception("%s failed; stopping the server", getattr(task, "__name__", task))
+        app.release()
+        log.info("stop pid=%s", os.getpid())
+        logging.shutdown()
+        os._exit(1)
+
+
 async def serve(cfg: Config) -> None:
     configure_logging(cfg)
     # Names only, never values: this line answers whether the plugin's `env`
@@ -793,7 +822,7 @@ async def serve(cfg: Config) -> None:
         async with anyio.create_task_group() as hub_tasks:
             await app.check_hub()
             if app.link is not None:
-                hub_tasks.start_soon(app.keep_link)
+                hub_tasks.start_soon(exit_on_error, app, app.keep_link)
                 # Only the claim needs the socket; a session without the
                 # channel answers its client at once.
                 if app.link.ws_url and app.receives:
@@ -834,8 +863,8 @@ async def run_session(app: BusServer, heartbeat_seconds: float) -> None:
             tg.start_soon(tap_in)
             tg.start_soon(exit_on_signal, app)
             if app.bus is not None and app.receives:
-                tg.start_soon(app.watch, write_stream, initialized)
-                tg.start_soon(app.channel_loop, heartbeat_seconds)
-                tg.start_soon(app.confirm_loop)
+                tg.start_soon(exit_on_error, app, app.watch, write_stream, initialized)
+                tg.start_soon(exit_on_error, app, app.channel_loop, heartbeat_seconds)
+                tg.start_soon(exit_on_error, app, app.confirm_loop)
             await server.run(in_recv, session_write, init)
             tg.cancel_scope.cancel()

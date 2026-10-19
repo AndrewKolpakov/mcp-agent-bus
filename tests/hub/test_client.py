@@ -14,6 +14,7 @@ import anyio
 import httpx
 import pytest
 from hubfakes import clock, hub, pusher, table, tokens
+from websockets.exceptions import ConnectionClosedError
 
 from agent_bus import remote
 from agent_bus.bus import Bus, BusError, HubUnavailableError, RateLimitError
@@ -333,6 +334,113 @@ def test_link_learns_its_connection_syncs_on_push_and_reconnects(
         "waiting since before the socket",
         "pushed",
     ]
+
+
+class DroppedSocket(FakeSocket):
+    """A socket that dies without a close frame (code 1006), on receive or on send."""
+
+    def __init__(self, frames: list[dict[str, Any]], *, on_send: bool) -> None:
+        super().__init__(frames)
+        self.on_send = on_send
+
+    async def send(self, data: str) -> None:
+        if self.on_send:
+            raise ConnectionClosedError(None, None)
+        await super().send(data)
+
+    async def __anext__(self) -> str:
+        if not self.frames:
+            await anyio.sleep(0.05)
+            raise ConnectionClosedError(None, None)
+        return await super().__anext__()
+
+
+@pytest.mark.parametrize("on_send", [False, True], ids=["on-receive", "on-ping"])
+def test_link_reconnects_after_a_socket_drops_without_a_close_frame(
+    client: Client, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, on_send: bool
+) -> None:
+    _, bob_store, bob_registry = client("bob")
+    sockets: list[DroppedSocket] = []
+
+    @asynccontextmanager
+    async def opener(url: str, **kwargs: Any) -> AsyncIterator[DroppedSocket]:
+        ws = DroppedSocket([{"type": "pong", "connection": f"c{len(sockets)}"}], on_send=on_send)
+        sockets.append(ws)
+        yield ws
+
+    monkeypatch.setattr(remote, "MAX_BACKOFF_SECONDS", 0.01)
+    link = HubLink("wss://ws", "ab_token", bob_store, bob_registry, opener=opener)
+
+    async def main() -> None:
+        with anyio.move_on_after(3):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(link.run)
+                while len(sockets) < 3:
+                    await anyio.sleep(0.02)
+                tg.cancel_scope.cancel()
+
+    monkeypatch.setattr(anyio, "sleep", _fast_sleep(anyio.sleep))
+    anyio.run(main)
+    assert len(sockets) >= 3
+    assert "hub socket: ConnectionClosedError" in caplog.text
+
+
+def test_the_server_starts_a_failed_link_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from agent_bus import server as server_module
+
+    remote.write_token(remote.hub_home(tmp_path / "bus", URL, "bob") / remote.TOKEN_NAME, "ab_x")
+    server = _hub_server(tmp_path)
+    server.link.ws_url = "wss://ws"
+    runs: list[int] = []
+
+    async def run() -> None:
+        runs.append(1)
+        if len(runs) == 1:
+            raise ValueError("not a link error")
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(server.link, "run", run)
+    monkeypatch.setattr(server_module, "HELLO_RETRY_SECONDS", 0.01)
+
+    async def main() -> None:
+        with anyio.move_on_after(1):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(server.keep_link)
+                while len(runs) < 2:
+                    await anyio.sleep(0.01)
+                tg.cancel_scope.cancel()
+
+    anyio.run(main)
+    assert len(runs) == 2
+    assert "hub link failed" in caplog.text
+    assert "ValueError: not a link error" in caplog.text
+
+
+def test_a_failed_background_task_stops_the_server_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from agent_bus import server as server_module
+
+    server = _hub_server(tmp_path)
+    released: list[bool] = []
+    monkeypatch.setattr(server, "release", lambda: released.append(True))
+
+    def exit_now(code: int) -> None:
+        raise SystemExit(code)
+
+    monkeypatch.setattr("agent_bus.server.os._exit", exit_now)
+
+    async def broken(arg: str) -> None:
+        raise RuntimeError(f"broken {arg}")
+
+    with pytest.raises(SystemExit) as stopped:
+        anyio.run(server_module.exit_on_error, server, broken, "loop")
+    assert stopped.value.code == 1
+    assert released == [True]
+    assert "broken failed; stopping the server" in caplog.text
+    assert "RuntimeError: broken loop" in caplog.text
 
 
 def _fast_sleep(real: Callable[[float], Any]) -> Callable[[float], Any]:

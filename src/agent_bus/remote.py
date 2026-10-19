@@ -246,6 +246,14 @@ def _line_start(fd: int, newline: int) -> int:
     return 0
 
 
+def _leaves(group: BaseExceptionGroup[BaseException]) -> list[BaseException]:
+    """The exceptions in a group, nested groups flattened."""
+    leaves: list[BaseException] = []
+    for exc in group.exceptions:
+        leaves.extend(_leaves(exc) if isinstance(exc, BaseExceptionGroup) else [exc])
+    return leaves
+
+
 class HubRegistry:
     """The channel claim and peers, kept by the hub.
 
@@ -341,6 +349,10 @@ class HubLink:
     async def run(self) -> None:
         backoff = 1.0
         while True:
+            # `except*`: a socket that drops without a close frame raises
+            # inside `_session`'s task group, which wraps the error in an
+            # ExceptionGroup that a plain `except` misses. The link then died
+            # and took the session's tasks with it (2026-10-19 incident).
             try:
                 async with self.opener(
                     self.ws_url,
@@ -350,8 +362,9 @@ class HubLink:
                 ) as ws:
                     backoff = 1.0
                     await self._session(ws)
-            except (OSError, TimeoutError, WebSocketException) as exc:
-                log.warning("hub socket: %s: %s", type(exc).__name__, exc)
+            except* (OSError, TimeoutError, WebSocketException) as group:
+                for exc in _leaves(group):
+                    log.warning("hub socket: %s: %s", type(exc).__name__, exc)
             finally:
                 self.registry.connection = None
             await anyio.sleep(backoff)
