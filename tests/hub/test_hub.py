@@ -6,9 +6,9 @@ import json
 from typing import Any
 
 import pytest
-from hubfakes import ENDPOINT, Clock, RecordingPusher, clock, hub, pusher, table, tokens
+from hubfakes import ENDPOINT, Clock, RecordingPusher, blobs, clock, hub, pusher, table, tokens
 
-__all__ = ["clock", "hub", "pusher", "table", "tokens"]  # fixtures
+__all__ = ["blobs", "clock", "hub", "pusher", "table", "tokens"]  # fixtures
 
 from agent_bus.hub import app
 from agent_bus.hub.app import Hub, HubError, Reply
@@ -216,17 +216,18 @@ def test_view_stops_at_the_byte_cap_but_returns_at_least_one(hub: Hub, table: Ta
 # --- peers and the channel claim ------------------------------------------------
 
 
+def liveness(hub: Hub, agent: str) -> list[tuple[str, bool]]:
+    return [(p["name"], p["live"]) for p in hub.peers(agent).body]
+
+
 def test_peers_are_teammates_with_liveness(hub: Hub, clock: Clock) -> None:
-    assert hub.peers("alice").body == [
-        {"name": "bob", "live": False},
-        {"name": "dave", "live": False},
-    ]
+    assert liveness(hub, "alice") == [("bob", False), ("dave", False)]
     assert [p["name"] for p in hub.peers("dave").body] == ["alice", "bob", "carol"]
     hub.connect("bob", "c-bob", ENDPOINT)
     hub.put_session("bob", {"session": "s1", "connection": "c-bob"})
-    assert hub.peers("alice").body[0] == {"name": "bob", "live": True}
+    assert liveness(hub, "alice")[0] == ("bob", True)
     clock.t += 151
-    assert hub.peers("alice").body[0] == {"name": "bob", "live": False}
+    assert liveness(hub, "alice")[0] == ("bob", False)
 
 
 def test_one_live_session_holds_the_channel(hub: Hub, clock: Clock) -> None:
@@ -342,9 +343,8 @@ def test_http_routes_through_the_adapter(hub: Hub) -> None:
         == 400
     )
     assert app.handler(http_event("GET", "/nope", "alice"), None, hub)["statusCode"] == 404
-    assert json.loads(app.handler(http_event("GET", "/peers", "carol"), None, hub)["body"]) == [
-        {"name": "dave", "live": False}
-    ]
+    peers = json.loads(app.handler(http_event("GET", "/peers", "carol"), None, hub)["body"])
+    assert [(p["name"], p["live"], p["state"]) for p in peers] == [("dave", False, "offline")]
 
 
 def test_hello_names_the_agent_and_the_websocket(table: Table, tokens: dict[str, str]) -> None:

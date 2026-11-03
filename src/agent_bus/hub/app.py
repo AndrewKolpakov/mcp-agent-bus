@@ -8,13 +8,21 @@ What `POST /events` accepts, by event type:
 
 | type         | the hub sets      | allowed when                                         |
 | ------------ | ----------------- | ---------------------------------------------------- |
-| `message`    | `from`, `thread`  | `to` shares a team with the caller; `reply_to`, if   |
-|              |                   | any, is a message the caller is a party to and its   |
-|              |                   | kind allows the reply; the pair is under the loop    |
-|              |                   | limit unless kind is `await_human`                   |
+| `message`    | `from`, `thread`  | `to` shares a team with the caller; the body and     |
+|              |                   | attachments hold no secret (leaks.py), and each      |
+|              |                   | attachment is the caller's upload with that sha256;  |
+|              |                   | `reply_to`, if any, is a                             |
+|              |                   | message the caller is a party to and its kind allows |
+|              |                   | the reply; the pair is under the loop limit unless   |
+|              |                   | kind is `await_human`                                |
 | `ack`        | `by`              | the message is addressed to the caller               |
 | `delivered`  | `to`              | the message is addressed to the caller               |
 | `human_turn` | `agent`           | always                                               |
+
+Each also updates the status rows behind `GET /peers` in the same
+transaction: the sender's last message and await_human, the recipient's
+open tasks, the agent's last human turn. `PUT /activity` stores what a
+session's hooks report; it is not an event and goes to no view.
 
 Every event also gets `ts` and `seq` from the hub. A message id that is
 already taken returns the stored message when the caller sent it, and 409
@@ -40,13 +48,25 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent_bus.bus import MAX_BODY_BYTES, BusError, RateLimitError, check_rate, check_reply
+from agent_bus.bus import (
+    MAX_BODY_BYTES,
+    BusError,
+    RateLimitError,
+    check_rate,
+    check_reply,
+    check_secrets,
+)
 from agent_bus.config import DEFAULT_RATE_LIMIT, DEFAULT_RATE_WINDOW_SECONDS
+from agent_bus.hub.blobs import Blobs, S3Blobs, blob_key
 from agent_bus.hub.push import ApiGatewayPusher, Pusher
 from agent_bus.hub.table import Claim, DuplicateError, MessageRef, Table
 from agent_bus.models import (
     KINDS,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS,
+    SHA256,
     AckEvent,
+    Attachment,
     DeliveredEvent,
     Event,
     HumanTurnEvent,
@@ -56,6 +76,8 @@ from agent_bus.models import (
     participants,
 )
 from agent_bus.state import BusState
+from agent_bus.status import ACTIVITIES, ActivityReport, derive
+from agent_bus.store import sha256_of
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -67,6 +89,8 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 """Below Lambda's 6 MB response limit, with room for the envelope."""
+ACTIVITY_SKEW_SECONDS = 300
+"""How far ahead of the hub's clock an activity report's time may be."""
 RECENT_CAP = 1000
 """Events read back for the loop window; far above any legitimate pace."""
 
@@ -119,8 +143,10 @@ class Hub:
         rate_window: float = DEFAULT_RATE_WINDOW_SECONDS,
         clock: Callable[[], float] = time.time,
         ws_url: str = "",
+        blobs: Blobs | None = None,
     ) -> None:
         self.ws_url = ws_url
+        self.blobs = blobs
         self.table = table
         self.pusher = pusher
         self.rate_limit = rate_limit
@@ -167,6 +193,11 @@ class Hub:
             raise HubError(400, "message body is empty")
         if len(text.encode()) > MAX_BODY_BYTES:
             raise HubError(400, f"message body exceeds {MAX_BODY_BYTES} bytes")
+        try:
+            check_secrets(text)
+        except BusError as exc:
+            raise HubError(422, str(exc)) from exc
+        attachments = self._attachments(agent, body.get("attachments"))
 
         taken = self.table.message(msg_id)
         if taken is not None:
@@ -208,11 +239,61 @@ class Hub:
             reply_to=reply_to,
             thread=thread,
             ts=self.now(),
+            attachments=attachments,
         )
         try:
             return self._write(event, participants(event))
         except DuplicateError as dup:
             return self._duplicate(agent, dup.ref)
+
+    def _attachments(self, agent: str, raw: Any) -> tuple[Attachment, ...] | None:
+        """Check each named file is the caller's upload, has that hash and holds no secret."""
+        if raw is None or raw == []:
+            return None
+        if not isinstance(raw, list) or len(raw) > MAX_ATTACHMENTS:
+            raise HubError(400, f"attachments must be a list of at most {MAX_ATTACHMENTS}")
+        if self.blobs is None:
+            raise HubError(400, "this hub keeps no attachments")
+        try:
+            attachments = tuple(Attachment.model_validate(a) for a in raw)
+        except ValidationError as exc:
+            raise HubError(400, f"bad attachment: {exc.errors()[0]['msg']}") from exc
+        for attachment in attachments:
+            data = self.blobs.read(blob_key(agent, attachment.sha256), MAX_ATTACHMENT_BYTES)
+            if data is None:
+                raise HubError(400, f"attachment {attachment.name} was not uploaded")
+            if len(data) != attachment.size or sha256_of(data) != attachment.sha256:
+                raise HubError(400, f"attachment {attachment.name} does not match its sha256")
+            try:
+                check_secrets(
+                    data.decode("utf-8", errors="replace"), f"attachment {attachment.name}"
+                )
+            except BusError as exc:
+                raise HubError(422, str(exc)) from exc
+        return attachments
+
+    def upload_attachment(self, agent: str, body: dict[str, Any]) -> Reply:
+        """Where to PUT a file; the message that names it is checked against the result."""
+        if self.blobs is None:
+            raise HubError(400, "this hub keeps no attachments")
+        sha = _text(body, "sha256") or ""
+        size = body.get("size")
+        if not SHA256.fullmatch(sha):
+            raise HubError(400, "sha256 must be 64 lowercase hex digits")
+        if not isinstance(size, int) or not 0 <= size <= MAX_ATTACHMENT_BYTES:
+            raise HubError(400, f"size must be 0..{MAX_ATTACHMENT_BYTES}")
+        return Reply(200, {"url": self.blobs.upload_url(blob_key(agent, sha))})
+
+    def download_attachment(self, agent: str, query: dict[str, str]) -> Reply:
+        """Where to GET a file attached to a message the caller is a party to."""
+        if self.blobs is None:
+            raise HubError(400, "this hub keeps no attachments")
+        msg_id = query.get("msg", "")
+        sha = query.get("sha256", "")
+        ref = self._visible(agent, msg_id, f"unknown message id: {msg_id}")
+        if sha not in ref.attachments:
+            raise HubError(404, f"message {msg_id} has no attachment {sha}")
+        return Reply(200, {"url": self.blobs.download_url(blob_key(ref.sender, sha))})
 
     def _duplicate(self, agent: str, ref: MessageRef) -> Reply:
         if ref.sender != agent:
@@ -235,11 +316,13 @@ class Hub:
             event = AckEvent(id=msg_id, by=agent, ts=self.now())
         else:
             event = DeliveredEvent(id=msg_id, to=agent, session=_session(body), ts=self.now())
-        return self._write(event, participants(event, ref))
+        return self._write(event, participants(event, ref), ref)
 
-    def _write(self, event: Event, parties: Iterable[str]) -> Reply:
+    def _write(
+        self, event: Event, parties: Iterable[str], original: MessageRef | None = None
+    ) -> Reply:
         views = sorted(parties)
-        stored = self.table.append(event, views)
+        stored = self.table.append(event, views, original)
         assert stored.seq is not None
         log.info("seq=%s type=%s views=%s", stored.seq, stored.type, ",".join(views))
         self.push(views, stored.seq)
@@ -274,8 +357,30 @@ class Hub:
         return found is not None and self.clock() - found.last_ping < LIVE_SECONDS
 
     def peers(self, agent: str) -> Reply:
-        names = sorted(self.table.teammates(agent))
-        return Reply(200, [{"name": name, "live": self.live(name)} for name in names])
+        """Teammates, whether live, and what each is doing (status.py)."""
+        peers = []
+        for name in sorted(self.table.teammates(agent)):
+            live = self.live(name)
+            activity, facts = self.table.status_of(name)
+            status = derive(live, activity, facts)
+            peers.append({"name": name, "live": live, **status.to_json()})
+        return Reply(200, peers)
+
+    def put_activity(self, agent: str, body: dict[str, Any]) -> Reply:
+        """Store what a session's hooks report; a report older than the stored one is dropped."""
+        state = body.get("state")
+        if state not in ACTIVITIES:
+            raise HubError(400, f"state must be one of {', '.join(ACTIVITIES)}")
+        try:
+            at = datetime.fromisoformat(_text(body, "at") or "")
+        except ValueError as exc:
+            raise HubError(400, "at must be an ISO-8601 time") from exc
+        if at.tzinfo is None:
+            raise HubError(400, "at needs a UTC offset")
+        # A clock running ahead must not pin a state that later reports cannot replace.
+        at = min(at, self.now() + timedelta(seconds=ACTIVITY_SKEW_SECONDS))
+        report = ActivityReport(state=state, at=at, session=_session(body))
+        return Reply(200, {"stored": self.table.put_activity(agent, report)})
 
     def get_session(self, agent: str) -> Reply:
         claim = self.table.claim_of(agent)
@@ -339,6 +444,7 @@ def _hub() -> Hub:
         rate_limit=int(os.environ.get("RATE_LIMIT", DEFAULT_RATE_LIMIT)),
         rate_window=float(os.environ.get("RATE_WINDOW_SECONDS", DEFAULT_RATE_WINDOW_SECONDS)),
         ws_url=os.environ.get("WS_URL", ""),
+        blobs=S3Blobs(os.environ["BUCKET"]) if os.environ.get("BUCKET") else None,
     )
 
 
@@ -408,6 +514,12 @@ def http(event: dict[str, Any], hub: Hub) -> dict[str, Any]:
             reply = hub.events(agent, event.get("queryStringParameters") or {})
         elif route == ("GET", "/peers"):
             reply = hub.peers(agent)
+        elif route == ("POST", "/attachments"):
+            reply = hub.upload_attachment(agent, _json_body(event))
+        elif route == ("GET", "/attachment"):
+            reply = hub.download_attachment(agent, event.get("queryStringParameters") or {})
+        elif route == ("PUT", "/activity"):
+            reply = hub.put_activity(agent, _json_body(event))
         elif route == ("GET", "/session"):
             reply = hub.get_session(agent)
         elif route == ("PUT", "/session"):

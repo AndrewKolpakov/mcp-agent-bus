@@ -13,12 +13,13 @@ import shutil
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from agent_bus import __version__, admin, config, hooks
 from agent_bus.backend import open_backend
-from agent_bus.bus import Bus, BusError
-from agent_bus.models import KINDS, Event, MessageEvent
+from agent_bus.bus import DEFAULT_HISTORY, Bus, BusError, Peer, parse_since
+from agent_bus.models import KINDS, Event, MessageEvent, now
 from agent_bus.names import PERMISSION_RULE, PLUGIN_ID
 from agent_bus.store import EventStore
 
@@ -45,11 +46,27 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--to", required=True, help="recipient agent name")
     send.add_argument("--kind", choices=KINDS, default="text")
     send.add_argument("--reply-to", help="id of the message this answers")
+    send.add_argument(
+        "-a", "--attach", action="append", default=[], metavar="PATH", help="attach a file"
+    )
     send.add_argument("body", help="message text, or '-' to read it from stdin")
 
     inbox = sub.add_parser("inbox", help="list messages addressed to you")
     inbox.add_argument("--all", action="store_true", help="include acknowledged messages")
     inbox.add_argument("--json", action="store_true", help="one JSON event per line")
+
+    history = sub.add_parser("history", help="messages you sent and received, filtered")
+    history.add_argument("--from", dest="sender", help="only messages from this agent")
+    history.add_argument("--thread", help="only this thread")
+    history.add_argument("--since", help="ISO-8601 time or an age: 30m, 2h, 1d")
+    history.add_argument(
+        "-n", "--last", type=int, default=DEFAULT_HISTORY, help="newest N (default %(default)s)"
+    )
+    history.add_argument("--all", action="store_true", help="every match, no cap")
+    history.add_argument("--json", action="store_true", help="one JSON event per line")
+
+    fetch = sub.add_parser("attachments", help="fetch a message's files, checked by sha256")
+    fetch.add_argument("msg_id")
 
     ack = sub.add_parser("ack", help="mark messages as handled")
     ack.add_argument("ids", nargs="+", metavar="id")
@@ -98,7 +115,11 @@ def format_event(event: Event) -> str:
     if isinstance(event, MessageEvent):
         reply = f" re {event.reply_to}" if event.reply_to else ""
         body = event.body.replace("\n", "\n    ")
-        return f"{stamp} {event.sender} -> {event.to} [{event.kind}] {event.id}{reply}\n    {body}"
+        files = "".join(
+            f"\n    + {a.name} ({a.size} bytes, sha256 {a.sha256})" for a in event.attachments or ()
+        )
+        head = f"{stamp} {event.sender} -> {event.to} [{event.kind}] {event.id}{reply}"
+        return f"{head}\n    {body}{files}"
     if event.type == "human_turn":
         return f"{stamp} human turn for {event.agent}"
     if event.type == "session_ready":
@@ -106,6 +127,41 @@ def format_event(event: Event) -> str:
     if event.type == "delivered":
         return f"{stamp} delivered {event.id} to {event.to}"
     return f"{stamp} ack {event.id} by {event.by}"
+
+
+def _ago(stamp: datetime, at: datetime) -> str:
+    seconds = max(0, int((at - stamp).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h{minutes:02d}m"
+    return f"{hours // 24}d"
+
+
+def _clock(stamp: datetime) -> str:
+    return stamp.astimezone().strftime("%H:%M" if stamp.date() == now().date() else "%m-%d %H:%M")
+
+
+def format_peer(peer: Peer, at: datetime | None = None) -> str:
+    """`bob  working 25m (since 09:58)  last sent 3m ago  unread by them 1`, then tasks."""
+    at = at or now()
+    status = peer.status
+    line = f"{peer.name}  {status.state.replace('_', ' ')}"
+    if status.since is not None:
+        line += f" {_ago(status.since, at)} (since {_clock(status.since)})"
+    line += "  last sent " + (f"{_ago(status.last_sent, at)} ago" if status.last_sent else "never")
+    if peer.unread_by_them:
+        line += f"  unread by them {peer.unread_by_them}"
+    for task in status.tasks:
+        line += (
+            f"\n    task thread={task.thread} msg_id={task.msg_id} from {task.sender}, "
+            f"open {_ago(task.since, at)} (since {_clock(task.since)})"
+        )
+    return line
 
 
 def _dump(event: Event) -> str:
@@ -287,21 +343,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if args.command == "send":
             body = sys.stdin.read() if args.body == "-" else args.body
-            message = bus.send(args.to, body, kind=args.kind, reply_to=args.reply_to)
+            message = bus.send(
+                args.to, body, kind=args.kind, reply_to=args.reply_to, attachments=args.attach
+            )
             print(message.id)
         elif args.command == "inbox":
             for message in bus.inbox(unread_only=not args.all):
                 print(_dump(message) if args.json else format_event(message))
+        elif args.command == "history":
+            found = bus.history(
+                sender=args.sender,
+                thread=args.thread,
+                since=parse_since(args.since) if args.since else None,
+                last=None if args.all else args.last,
+            )
+            for message in found:
+                print(_dump(message) if args.json else format_event(message))
+        elif args.command == "attachments":
+            for attachment, path in bus.attachments(args.msg_id):
+                print(f"{path}  {attachment.name}  {attachment.size} bytes  {attachment.sha256}")
         elif args.command == "ack":
             for msg_id in args.ids:
                 print(f"{msg_id} {'acked' if bus.ack(msg_id) else 'already acked'}")
         elif args.command == "peers":
             for peer in bus.peers():
-                if args.json:
-                    print(json.dumps(peer.__dict__))
-                else:
-                    state = "live" if peer.live else "offline"
-                    print(f"{peer.name} {state} unread_by_them={peer.unread_by_them}")
+                print(json.dumps(peer.to_json()) if args.json else format_peer(peer))
         return 0
     except (BusError, ValueError) as exc:
         print(f"agent-bus: {exc}", file=sys.stderr)

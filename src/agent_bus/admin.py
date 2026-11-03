@@ -82,13 +82,8 @@ def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 
 
 def open_hub(args: argparse.Namespace) -> HubRef:
-    try:
-        import boto3
-    except ImportError:
-        raise SystemExit(
-            "agent-bus admin needs boto3: run it from the repository with `uv run`,"
-            " or install agent-bus[admin]"
-        ) from None
+    import boto3
+
     from agent_bus.hub.table import Table
 
     if args.table:
@@ -102,7 +97,13 @@ def open_hub(args: argparse.Namespace) -> HubRef:
 
 
 def run(args: argparse.Namespace, hub: HubRef | None = None) -> int:
-    from botocore.exceptions import BotoCoreError, ClientError
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError:
+        raise SystemExit(
+            "agent-bus admin needs boto3: run it from the repository with `uv run`,"
+            " or install agent-bus[admin]"
+        ) from None
 
     try:
         return _run(args, hub or open_hub(args))

@@ -15,13 +15,14 @@ import secrets
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import boto3
 from botocore.exceptions import ClientError
 
 from agent_bus.models import EVENT_ADAPTER, Event, Kind, check_agent_name, check_team_name
+from agent_bus.status import ActivityReport, BusFacts, OpenTask
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
@@ -64,6 +65,10 @@ def _num(item: Item, name: str) -> float:
     return float(item[name]["N"])
 
 
+def _time(item: Item, name: str) -> datetime:
+    return datetime.fromtimestamp(_num(item, name), UTC)
+
+
 def _code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
@@ -78,6 +83,8 @@ class MessageRef:
     kind: Kind
     thread: str
     seq: int
+    attachments: frozenset[str] = frozenset()
+    """The sha256 of each attached file."""
 
 
 @dataclass(frozen=True)
@@ -365,6 +372,9 @@ class Table:
             kind=_str(item, "kind"),  # type: ignore[arg-type]
             thread=_str(item, "thread"),
             seq=int(_num(item, "seq")),
+            attachments=frozenset(item["attachments"]["SS"])
+            if "attachments" in item
+            else frozenset(),
         )
 
     def event_at(self, seq: int) -> Event:
@@ -373,8 +383,13 @@ class Table:
             raise LookupError(f"no event at seq {seq}")
         return EVENT_ADAPTER.validate_json(_str(item, "event"))
 
-    def append(self, event: Event, parties: Iterable[str]) -> Event:
+    def append(
+        self, event: Event, parties: Iterable[str], original: MessageRef | None = None
+    ) -> Event:
         """Give `event` the next seq and write it to the log and each party's view.
+
+        The status rows the event changes (`_status_items`) go in the same
+        transaction. `original` is the message an ack settles.
 
         Raises `DuplicateError` when `event` is a message whose id is taken.
         """
@@ -398,19 +413,22 @@ class Table:
                 }
             ]
             if stored.type == "message":
+                header: Item = {
+                    "pk": _s(f"MSG#{stored.id}"),
+                    "sk": _s("EVENT"),
+                    "seq": _n(seq),
+                    "from": _s(stored.sender),
+                    "to": _s(stored.to),
+                    "kind": _s(stored.kind),
+                    "thread": _s(stored.thread),
+                }
+                if stored.attachments:
+                    header["attachments"] = {"SS": sorted({a.sha256 for a in stored.attachments})}
                 items.append(
                     {
                         "Put": {
                             "TableName": self.name,
-                            "Item": {
-                                "pk": _s(f"MSG#{stored.id}"),
-                                "sk": _s("EVENT"),
-                                "seq": _n(seq),
-                                "from": _s(stored.sender),
-                                "to": _s(stored.to),
-                                "kind": _s(stored.kind),
-                                "thread": _s(stored.thread),
-                            },
+                            "Item": header,
                             "ConditionExpression": "attribute_not_exists(pk)",
                         }
                     }
@@ -429,6 +447,7 @@ class Table:
                 }
                 for party in views
             )
+            items.extend(self._status_items(stored, original))
             try:
                 self.client.transact_write_items(TransactItems=items)
                 return stored
@@ -449,6 +468,120 @@ class Table:
                     raise
             time.sleep(0.005 * attempt)
         raise SequencerGaveUpError(f"no free seq after {MAX_ATTEMPTS} attempts")
+
+    # --- status ---------------------------------------------------------------
+    # `AGENT#<a>`/`STATUS` holds when `a` last sent, last sent await_human,
+    # last had a human turn, and its session's latest activity report;
+    # `AGENT#<a>`/`TASK#<id>` is a task to `a` not yet acked. The event
+    # rows stay the record; these only save the hub replaying a view.
+
+    def _status_items(
+        self, event: Event, original: MessageRef | None
+    ) -> list[TransactWriteItemTypeDef]:
+        assert event.seq is not None
+        stamp = _n(event.ts.timestamp())
+        if event.type == "message":
+            sets = "SET last_sent = :t"
+            if event.kind == "await_human":
+                sets += ", await_human_at = :t"
+            items: list[TransactWriteItemTypeDef] = [
+                {
+                    "Update": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"AGENT#{event.sender}"), "sk": _s("STATUS")},
+                        "UpdateExpression": sets,
+                        "ExpressionAttributeValues": {":t": stamp},
+                    }
+                }
+            ]
+            if event.kind == "task":
+                items.append(
+                    {
+                        "Put": {
+                            "TableName": self.name,
+                            "Item": {
+                                "pk": _s(f"AGENT#{event.to}"),
+                                "sk": _s(f"TASK#{event.id}"),
+                                "thread": _s(event.thread),
+                                "from": _s(event.sender),
+                                "since": stamp,
+                            },
+                        }
+                    }
+                )
+            return items
+        if event.type == "ack" and original is not None and original.kind == "task":
+            return [
+                {
+                    "Delete": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"AGENT#{event.by}"), "sk": _s(f"TASK#{event.id}")},
+                    }
+                }
+            ]
+        if event.type == "human_turn":
+            return [
+                {
+                    "Update": {
+                        "TableName": self.name,
+                        "Key": {"pk": _s(f"AGENT#{event.agent}"), "sk": _s("STATUS")},
+                        "UpdateExpression": "SET human_at = :t",
+                        "ExpressionAttributeValues": {":t": stamp},
+                    }
+                }
+            ]
+        return []
+
+    def put_activity(self, agent: str, report: ActivityReport) -> bool:
+        """Store the report unless a later one is stored; False when it was dropped."""
+        try:
+            self.client.update_item(
+                TableName=self.name,
+                Key={"pk": _s(f"AGENT#{agent}"), "sk": _s("STATUS")},
+                UpdateExpression="SET activity = :s, activity_at = :at, activity_session = :sid",
+                ConditionExpression="attribute_not_exists(activity_at) OR activity_at <= :at",
+                ExpressionAttributeValues={
+                    ":s": _s(report.state),
+                    ":at": _n(report.at.timestamp()),
+                    ":sid": _s(report.session),
+                },
+            )
+        except ClientError as exc:
+            if _code(exc) == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
+
+    def status_of(self, agent: str) -> tuple[ActivityReport | None, BusFacts]:
+        """The agent's last activity report and what the bus knows of it."""
+        row: Item = self._get(f"AGENT#{agent}", "STATUS") or {}
+        tasks = [
+            OpenTask(
+                msg_id=_str(item, "sk").removeprefix("TASK#"),
+                thread=_str(item, "thread"),
+                sender=_str(item, "from"),
+                since=_time(item, "since"),
+            )
+            for item in self._query(f"AGENT#{agent}", "TASK#")
+        ]
+
+        def stamp(name: str) -> datetime | None:
+            return _time(row, name) if name in row else None
+
+        activity = None
+        if "activity" in row and "activity_at" in row:
+            activity = ActivityReport(
+                state=_str(row, "activity"),  # type: ignore[arg-type]
+                at=_time(row, "activity_at"),
+                session=_str(row, "activity_session") if "activity_session" in row else "",
+            )
+        facts = BusFacts(
+            last_sent=stamp("last_sent"),
+            await_human_at=stamp("await_human_at"),
+            human_at=stamp("human_at"),
+            tasks=tuple(tasks),
+        )
+        return activity, facts
 
     def log_tail(self, count: int) -> list[Event]:
         """The last `count` events of the whole log, oldest first."""

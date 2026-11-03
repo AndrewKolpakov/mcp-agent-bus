@@ -13,6 +13,33 @@ from agent_bus.hub.app import Hub
 from agent_bus.hub.table import Table
 
 ENDPOINT = "https://ws.example/dev"
+BLOB_HOST = "blobs.test"
+
+
+class FakeBlobs:
+    """The bucket: presigned URLs are plain URLs on BLOB_HOST, served by `serve`."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def upload_url(self, key: str) -> str:
+        return f"https://{BLOB_HOST}/{key}?sig=put"
+
+    def download_url(self, key: str) -> str:
+        return f"https://{BLOB_HOST}/{key}?sig=get"
+
+    def read(self, key: str, max_bytes: int) -> bytes | None:
+        data = self.objects.get(key)
+        return data if data is not None and len(data) <= max_bytes else None
+
+    def serve(self, method: str, path: str, sig: str, body: bytes) -> tuple[int, bytes]:
+        key = path.lstrip("/")
+        if method == "PUT" and sig == "put":
+            self.objects[key] = body
+            return 200, b""
+        if method == "GET" and sig == "get" and key in self.objects:
+            return 200, self.objects[key]
+        return 403, b"denied"
 
 
 class Clock:
@@ -79,5 +106,12 @@ def pusher() -> RecordingPusher:
 
 
 @pytest.fixture
-def hub(table: Table, tokens: dict[str, str], pusher: RecordingPusher, clock: Clock) -> Hub:
-    return Hub(table, pusher, rate_limit=3, rate_window=300, clock=clock)
+def blobs() -> FakeBlobs:
+    return FakeBlobs()
+
+
+@pytest.fixture
+def hub(
+    table: Table, tokens: dict[str, str], pusher: RecordingPusher, clock: Clock, blobs: FakeBlobs
+) -> Hub:
+    return Hub(table, pusher, rate_limit=3, rate_window=300, clock=clock, blobs=blobs)

@@ -6,7 +6,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
-            "args": ["hook", "session-start"],
+            "args": [
+              "hook",
+              "session-start"
+            ],
             "timeout": 300
           }
         ]
@@ -18,7 +21,24 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
-            "args": ["hook", "user-prompt-submit"],
+            "args": [
+              "hook",
+              "user-prompt-submit"
+            ],
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+            "args": [
+              "hook",
+              "turn-start"
+            ],
+            "async": true,
             "timeout": 30
           }
         ]
@@ -30,8 +50,73 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
-            "args": ["hook", "stop"],
+            "args": [
+              "hook",
+              "stop"
+            ],
             "timeout": 60
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+            "args": [
+              "hook",
+              "turn-end"
+            ],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+            "args": [
+              "hook",
+              "turn-end"
+            ],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+            "args": [
+              "hook",
+              "permission-request"
+            ],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh",
+            "args": [
+              "hook",
+              "post-tool-use"
+            ],
+            "async": true,
+            "timeout": 30
           }
         ]
       }

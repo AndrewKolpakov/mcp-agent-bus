@@ -121,3 +121,31 @@ def test_a_broken_hook_never_fails_the_turn(
     assert hooks.run("stop", stdin=io.StringIO("{}"), stdout=out, env=env) == 0
     assert out.getvalue() == ""
     assert "invalid agent name" in capsys.readouterr().err
+
+
+def _activity(bus_dir: Path) -> tuple[str, str] | None:
+    from agent_bus.registry import Registry
+
+    report = Registry(Store(bus_dir)).activity("bob")
+    return (report.state, report.session) if report else None
+
+
+def test_activity_hooks_report_turns_and_permission_prompts(bus_dir: Path, tmp_path: Path) -> None:
+    env = _env(bus_dir, AGENT_BUS_STATE_DIR=str(tmp_path / "data"))
+    session = {"session_id": "s-1"}
+    assert _run("turn-start", env, session) == ""
+    assert _activity(bus_dir) == ("working", "s-1")
+    assert _run("permission-request", env, session) == ""
+    assert _activity(bus_dir) == ("waiting_human", "s-1")
+    assert (tmp_path / "data" / "waiting-s-1").exists()
+    _run("post-tool-use", env, session)
+    assert _activity(bus_dir) == ("working", "s-1")
+    assert not (tmp_path / "data" / "waiting-s-1").exists()
+    _run("turn-end", env, session)
+    assert _activity(bus_dir) == ("idle", "s-1")
+
+
+def test_post_tool_use_without_a_prompt_reports_nothing(bus_dir: Path, tmp_path: Path) -> None:
+    env = _env(bus_dir, AGENT_BUS_STATE_DIR=str(tmp_path / "data"))
+    _run("post-tool-use", env, {"session_id": "s-1"})
+    assert _activity(bus_dir) is None

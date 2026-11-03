@@ -8,6 +8,7 @@ import pytest
 from agent_bus.bus import MAX_BODY_BYTES, Bus, BusError, RateLimitError, check_reply
 from agent_bus.models import AckEvent, Event, MessageEvent, now
 from agent_bus.registry import Registry
+from agent_bus.status import ActivityReport, Status
 from agent_bus.store import Store
 
 
@@ -156,6 +157,12 @@ class TeamRegistry:
 
     def teammates(self, agent: str) -> set[str] | None:
         return self.team
+
+    def report_activity(self, agent: str, report: ActivityReport) -> None:
+        pass
+
+    def statuses(self, agent: str) -> dict[str, Status] | None:
+        return None
 
 
 def test_peers_on_a_team_are_the_teammates_only(store: Store, alice: Bus) -> None:

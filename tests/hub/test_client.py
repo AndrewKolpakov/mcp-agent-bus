@@ -13,7 +13,7 @@ from typing import Any
 import anyio
 import httpx
 import pytest
-from hubfakes import clock, hub, pusher, table, tokens
+from hubfakes import BLOB_HOST, FakeBlobs, blobs, clock, hub, pusher, table, tokens
 from websockets.exceptions import ConnectionClosedError
 
 from agent_bus import remote
@@ -24,7 +24,7 @@ from agent_bus.hub.table import Claim, Table
 from agent_bus.models import MessageEvent
 from agent_bus.remote import HubApi, HubLink, HubRegistry, HubStore
 
-__all__ = ["clock", "hub", "pusher", "table", "tokens"]  # fixtures
+__all__ = ["blobs", "clock", "hub", "pusher", "table", "tokens"]  # fixtures
 
 URL = "https://hub.test"
 
@@ -33,6 +33,14 @@ def bridge(hub: Hub, *, delay: float = 0.0) -> httpx.MockTransport:
     """API Gateway in one function: the authorizer, then the Lambda's HTTP adapter."""
 
     def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == BLOB_HOST:
+            # The bucket: it must never see the hub token.
+            assert "authorization" not in request.headers
+            assert isinstance(hub.blobs, FakeBlobs)
+            status, body = hub.blobs.serve(
+                request.method, request.url.path, request.url.params.get("sig", ""), request.content
+            )
+            return httpx.Response(status, content=body)
         token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if not token:
             return httpx.Response(401, json={"message": "Unauthorized"})
@@ -499,3 +507,38 @@ def test_a_token_readable_by_others_is_refused(tmp_path: Path) -> None:
     path.chmod(0o644)
     server = _hub_server(tmp_path)
     assert "readable by others" in server.instructions()
+
+
+def test_an_attachment_round_trips_through_the_bucket(
+    client: Client, tmp_path: Path, blobs: FakeBlobs
+) -> None:
+    alice, _, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    source = tmp_path / "review.py"
+    source.write_text("def f():\n    return 1\n")
+    sent = alice.send("bob", "please review", kind="task", attachments=[source])
+    bob_store.sync()
+    [(attachment, path)] = bob.attachments(sent.id)
+    assert path.read_bytes() == source.read_bytes()
+    assert path.parent == bob_store.home / "attachments"
+    assert attachment.name == "review.py"
+
+    # A copy that rots on disk is fetched again; a bucket object that changed is refused.
+    path.write_text("tampered")
+    assert bob.attachments(sent.id)[0][1].read_bytes() == source.read_bytes()
+    path.unlink()
+    blobs.objects[f"alice/{attachment.sha256}"] = b"swapped"
+    with pytest.raises(ValueError, match="another sha256"):
+        bob.attachments(sent.id)
+    assert not path.exists()
+
+
+def test_peers_carry_the_hubs_status_and_activity(client: Client, hub: Hub) -> None:
+    alice, _, _ = client("alice")
+    bob, _, _ = client("bob")
+    task = alice.send("bob", "do it", kind="task")
+    bob.report_activity("s-bob", "working")
+    peers = {p.name: p for p in alice.peers()}
+    assert [t.msg_id for t in peers["bob"].status.tasks] == [task.id]
+    assert peers["bob"].status.state == "offline"  # bob holds no channel
+    assert hub.table.status_of("bob")[0] is not None

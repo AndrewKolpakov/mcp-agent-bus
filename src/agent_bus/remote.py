@@ -10,7 +10,9 @@ never duplicate or reorder a line, and the mirror's line order is seq order,
 which is what replay in state.py relies on.
 
 Writes go to the hub, which answers with the stored event; the mirror sees
-it only on the next sync. `HubLink` keeps a WebSocket open, pings every
+it only on the next sync. Attachments go to the hub's bucket by presigned
+URL and come back the same way into `attachments/` beside the mirror,
+checked against their sha256 before they are kept. `HubLink` keeps a WebSocket open, pings every
 `PING_SECONDS` (that is both the keepalive and the channel claim's liveness)
 and syncs whenever the hub pushes `{"seq": N}`, after every (re)connect,
 and on every ping as a fallback for a lost push.
@@ -39,8 +41,17 @@ from websockets.exceptions import WebSocketException
 
 from agent_bus import __version__
 from agent_bus.bus import BusError, HubUnavailableError, RateLimitError
-from agent_bus.models import EVENT_ADAPTER, Event, dump_event
-from agent_bus.store import LOG_NAME, ReadResult, Store
+from agent_bus.models import EVENT_ADAPTER, Attachment, Event, MessageEvent, dump_event
+from agent_bus.status import ActivityReport, Status
+from agent_bus.store import (
+    LOG_NAME,
+    AttachmentError,
+    ReadResult,
+    Store,
+    sha256_of,
+    verified,
+    write_private,
+)
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +63,7 @@ PEERS_TTL_SECONDS = 5.0
 TAIL_BYTES = 64 * 1024
 """Block size for reading the mirror backwards to find its last seq."""
 MAX_BACKOFF_SECONDS = 60.0
+BLOB_TIMEOUT_SECONDS = 60.0
 
 
 def hub_home(bus_dir: Path, hub: str, agent: str) -> Path:
@@ -97,6 +109,13 @@ class HubApi:
             timeout=timeout,
             transport=transport,
         )
+        # Presigned storage URLs carry their own authorization; the hub
+        # token must never travel to them.
+        self.blobs = httpx.Client(
+            headers={"user-agent": f"agent-bus/{__version__}"},
+            timeout=max(timeout, BLOB_TIMEOUT_SECONDS),
+            transport=transport,
+        )
 
     def _call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -135,6 +154,33 @@ class HubApi:
     def peers(self) -> list[dict[str, Any]]:
         reply: list[dict[str, Any]] = self._call("GET", "/peers").json()
         return reply
+
+    def upload_attachment(self, attachment: Attachment, data: bytes) -> None:
+        """Ask the hub where to put the file, then put it there."""
+        target: dict[str, Any] = self._call(
+            "POST", "/attachments", json={"sha256": attachment.sha256, "size": attachment.size}
+        ).json()
+        try:
+            response = self.blobs.put(target["url"], content=data, headers=target.get("headers"))
+        except httpx.HTTPError as exc:
+            raise HubUnavailableError(f"attachment upload failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise HubUnavailableError(f"attachment upload answered {response.status_code}")
+
+    def download_attachment(self, msg_id: str, attachment: Attachment) -> bytes:
+        target: dict[str, Any] = self._call(
+            "GET", "/attachment", params={"msg": msg_id, "sha256": attachment.sha256}
+        ).json()
+        try:
+            response = self.blobs.get(target["url"])
+        except httpx.HTTPError as exc:
+            raise HubUnavailableError(f"attachment download failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise HubUnavailableError(f"attachment download answered {response.status_code}")
+        return response.content
+
+    def put_activity(self, record: dict[str, Any]) -> None:
+        self._call("PUT", "/activity", json=record)
 
     def put_session(self, session: str, connection: str) -> bool:
         """Claim or keep the channel; False when another live session holds it."""
@@ -175,6 +221,23 @@ class HubStore:
 
     def read_all(self) -> ReadResult:
         return self.mirror.read_all()
+
+    def put_attachment(self, attachment: Attachment, data: bytes) -> None:
+        self.api.upload_attachment(attachment, data)
+        # The sender keeps its own copy, as the local bus does.
+        write_private(self.mirror.attachments_dir, attachment.sha256, data)
+
+    def attachment_path(self, message: MessageEvent, attachment: Attachment) -> Path:
+        path = self.mirror.attachments_dir / attachment.sha256
+        if verified(path, attachment):
+            return path
+        data = self.api.download_attachment(message.id, attachment)
+        if len(data) != attachment.size or sha256_of(data) != attachment.sha256:
+            raise AttachmentError(
+                f"attachment {attachment.name} of {message.id} came back with another "
+                "sha256 than the message names; it was not saved, do not use it"
+            )
+        return write_private(self.mirror.attachments_dir, attachment.sha256, data)
 
     def sync(self) -> int:
         """Append the hub's events above the mirror's last seq; return how many."""
@@ -308,6 +371,13 @@ class HubRegistry:
 
     def teammates(self, agent: str) -> set[str] | None:
         return {p["name"] for p in self._peer_list()}
+
+    def report_activity(self, agent: str, report: ActivityReport) -> None:
+        self.api.put_activity(json.loads(report.model_dump_json()))
+
+    def statuses(self, agent: str) -> dict[str, Status] | None:
+        """The hub's status of each teammate; a hub older than 1.4 sends none."""
+        return {p["name"]: Status.from_json(p) for p in self._peer_list() if "state" in p}
 
 
 class HubLink:

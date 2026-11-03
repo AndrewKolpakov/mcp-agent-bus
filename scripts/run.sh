@@ -12,6 +12,17 @@ if [ "${1:-}" = "hook" ] && [ "${AGENT_BUS_SESSION:-}" != "1" ]; then
 fi
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+DATA="${CLAUDE_PLUGIN_DATA:-$ROOT/.plugin-data}"
+export AGENT_BUS_STATE_DIR="$DATA"
+
+# PostToolUse fires after every tool call, but only matters right after a
+# permission prompt, which leaves a waiting-<session> marker (hooks.py).
+if [ "${1:-}" = "hook" ] && [ "${2:-}" = "post-tool-use" ]; then
+    for marker in "$DATA"/waiting-*; do
+        [ -e "$marker" ] && break
+        exit 0
+    done
+fi
 
 UV="$(command -v uv 2>/dev/null || true)"
 for candidate in "${HOME:-}/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
@@ -30,5 +41,5 @@ fi
 # The venv lives outside the plugin root, which moves on every plugin update.
 # CLAUDE_PLUGIN_DATA is per account; the fallback serves a human running this
 # script from a shell.
-export UV_PROJECT_ENVIRONMENT="${CLAUDE_PLUGIN_DATA:-$ROOT/.plugin-data}/venv"
+export UV_PROJECT_ENVIRONMENT="$DATA/venv"
 exec "$UV" run --quiet --frozen --no-dev --project "$ROOT" agent-bus "$@"

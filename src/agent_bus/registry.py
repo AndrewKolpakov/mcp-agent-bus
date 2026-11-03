@@ -10,6 +10,9 @@ together cannot both win.
 `Registry` is the local implementation. On a hub (PLAN.md, v2) the claim
 lives on the hub, liveness is a recent app-level ping instead of a pid, and
 the agents one may write to are one's teammates rather than everyone.
+
+Next to its claim each agent has an activity file, `sessions/<agent>.activity`,
+with the latest report from its session's hooks (status.py).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import Protocol
 from pydantic import BaseModel, ValidationError
 
 from agent_bus.models import now
+from agent_bus.status import ActivityReport, Status
 from agent_bus.store import Store
 
 HEARTBEAT_SECONDS = 10
@@ -67,6 +71,14 @@ class SessionRegistry(Protocol):
 
     def teammates(self, agent: str) -> set[str] | None:
         """Agents `agent` may message, or None when anyone on the bus may be."""
+        ...
+
+    def report_activity(self, agent: str, report: ActivityReport) -> None:
+        """Store what the agent's session is doing, unless a later report is already stored."""
+        ...
+
+    def statuses(self, agent: str) -> dict[str, Status] | None:
+        """Each teammate's status as the hub derives it; None where the caller derives it."""
         ...
 
 
@@ -152,4 +164,29 @@ class Registry:
 
     def teammates(self, agent: str) -> set[str] | None:
         # Everyone on a local bus is the same OS user.
+        return None
+
+    def _activity_path(self, agent: str) -> Path:
+        return self.store.sessions_dir / f"{agent}.activity"
+
+    def activity(self, agent: str) -> ActivityReport | None:
+        try:
+            with self._activity_path(agent).open(encoding="utf-8") as fh:
+                return ActivityReport.model_validate_json(fh.read())
+        except (FileNotFoundError, ValidationError):
+            return None
+
+    def report_activity(self, agent: str, report: ActivityReport) -> None:
+        with self._locked(agent):
+            current = self.activity(agent)
+            if current is not None and current.at > report.at:
+                return
+            path = self._activity_path(agent)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(report.model_dump_json())
+            tmp.replace(path)
+
+    def statuses(self, agent: str) -> dict[str, Status] | None:
         return None

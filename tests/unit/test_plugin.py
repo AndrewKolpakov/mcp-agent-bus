@@ -125,3 +125,27 @@ def test_run_sh_starts_the_cli_through_uv(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"agent-bus {__version__}\n"
     assert (tmp_path / "data" / "venv").is_dir()
+
+
+def test_run_sh_skips_post_tool_use_without_a_waiting_marker(tmp_path: Path) -> None:
+    # No uv on PATH: reaching it would fail, so a clean exit proves the skip.
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "AGENT_BUS_SESSION": "1",
+        "CLAUDE_PLUGIN_ROOT": str(ROOT),
+        "CLAUDE_PLUGIN_DATA": str(tmp_path / "data"),
+    }
+    result = subprocess.run(
+        [str(RUN_SH), "hook", "post-tool-use"], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_activity_hooks_run_in_the_background() -> None:
+    config = _json("hooks/hooks.json")["hooks"]
+    for event in ("PermissionRequest", "PostToolUse", "StopFailure"):
+        assert all(h.get("async") for group in config[event] for h in group["hooks"])
+    for event in ("UserPromptSubmit", "Stop"):
+        hooks = [h for group in config[event] for h in group["hooks"]]
+        assert [h["args"][1] for h in hooks if h.get("async")] in (["turn-start"], ["turn-end"])

@@ -64,7 +64,14 @@ def test_discover_probe_is_refused_and_initialize_declares_the_channel(spawn: Sp
     assert init["capabilities"]["experimental"] == {"claude/channel": {}}
     assert 'You are agent "bob"' in init["instructions"]
     tools = server.request("tools/list")["result"]["tools"]
-    assert sorted(t["name"] for t in tools) == ["ack", "inbox", "peers", "send"]
+    assert sorted(t["name"] for t in tools) == [
+        "ack",
+        "attachments",
+        "history",
+        "inbox",
+        "peers",
+        "send",
+    ]
 
 
 def test_a_new_message_is_pushed_as_a_channel_event(spawn: Spawn, bus_dir: Path) -> None:
@@ -122,7 +129,10 @@ def test_tools_send_inbox_ack_and_peers(spawn: Spawn, bus_dir: Path) -> None:
     }
     peers = tool_json(server.call("peers"))
     # alice has not acked bob's answer yet.
-    assert peers == [{"name": "alice", "live": False, "unread_by_them": 1}]
+    assert [(p["name"], p["live"], p["unread_by_them"], p["state"]) for p in peers] == [
+        ("alice", False, 1, "offline")
+    ]
+    assert peers[0]["last_sent"] is not None
 
 
 def test_tool_errors_come_back_as_error_results(spawn: Spawn, bus_dir: Path) -> None:
@@ -230,7 +240,14 @@ def test_a_background_session_never_takes_the_channel(spawn: Spawn, bus_dir: Pat
     init = background.handshake()["result"]
     assert "background session" in init["instructions"]
     tools = background.request("tools/list")["result"]["tools"]
-    assert sorted(t["name"] for t in tools) == ["ack", "inbox", "peers", "send"]
+    assert sorted(t["name"] for t in tools) == [
+        "ack",
+        "attachments",
+        "history",
+        "inbox",
+        "peers",
+        "send",
+    ]
     assert Registry(Store(bus_dir)).live() == {}
     msg = _alice(bus_dir).send("bob", "for the interactive session")
     assert (
@@ -337,3 +354,26 @@ def test_the_discover_probe_does_not_flood_server_log(spawn: Spawn, bus_dir: Pat
     text = (bus_dir / "server.log").read_text()
     assert "Failed to validate request" not in text
     assert "validation error" not in text
+
+
+def test_attachments_history_and_secret_refusals_through_the_tools(
+    spawn: Spawn, bus_dir: Path, tmp_path: Path
+) -> None:
+    server = spawn()
+    source = tmp_path / "patch.diff"
+    source.write_text("-a\n+b\n")
+    sent = _alice(bus_dir).send("bob", "review please", kind="task", attachments=[source])
+    meta = server.channel_events()["params"]["meta"]
+    assert "patch.diff (6 bytes, sha256 " in meta["attachments"]
+
+    [fetched] = tool_json(server.call("attachments", {"msg_id": sent.id}))
+    assert (fetched["name"], fetched["verified"]) == ("patch.diff", True)
+    assert Path(fetched["path"]).read_bytes() == source.read_bytes()
+
+    history = tool_json(server.call("history", {"from": "alice", "last": 5}))
+    assert [m["id"] for m in history] == [sent.id]
+    assert history[0]["attachments"][0]["name"] == "patch.diff"
+
+    leaked = server.call("send", {"to": "alice", "body": "AKIA" + "IOSFODNN7ABCDEFG"})
+    assert leaked["isError"]
+    assert "AWS access key id" in leaked["content"][0]["text"]

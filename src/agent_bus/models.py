@@ -71,6 +71,53 @@ class _Event(BaseModel):
     seq: int | None = None
 
 
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENT_NAME = 200
+
+
+class Attachment(BaseModel):
+    """A file sent with a message, named by its content.
+
+    The bytes travel apart from the event (local: `<bus_dir>/attachments/`,
+    hub: S3) and are fetched and checked against `sha256` before anyone
+    reads them. `name` is the sender's file name, shown to the reader and
+    never used as a path: a sender must not pick where a file lands on the
+    recipient's machine.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    sha256: str
+    name: str
+    size: int = Field(ge=0, le=MAX_ATTACHMENT_BYTES)
+
+    @field_validator("sha256")
+    @classmethod
+    def _valid_sha(cls, value: str) -> str:
+        if not SHA256.fullmatch(value):
+            raise ValueError("sha256 must be 64 lowercase hex digits")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _valid_name(cls, value: str) -> str:
+        if (
+            not value
+            or len(value) > MAX_ATTACHMENT_NAME
+            or "/" in value
+            or "\\" in value
+            or value in (".", "..")
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)
+        ):
+            raise ValueError(
+                f"attachment name {value!r} must be a plain file name of 1-"
+                f"{MAX_ATTACHMENT_NAME} characters"
+            )
+        return value
+
+
 class MessageEvent(_Event):
     type: Literal["message"] = "message"
     id: str = Field(default_factory=new_id)
@@ -80,6 +127,8 @@ class MessageEvent(_Event):
     body: str
     reply_to: str | None = None
     thread: str
+    attachments: tuple[Attachment, ...] | None = None
+    """Left out of the line when there are none, so old readers see what they always did."""
 
     @field_validator("sender", "to")
     @classmethod

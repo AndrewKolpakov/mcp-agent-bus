@@ -16,6 +16,10 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 14
+  AttachmentRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Days an attachment is kept; a message outlives its files
 
 Resources:
   Table:
@@ -32,6 +36,52 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expires
         Enabled: true
+
+  # Attachments, keyed <sender>/<sha256>, reached only by presigned URLs the
+  # Lambda hands out (src/agent_bus/hub/blobs.py).
+  Attachments:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Name}-attachments-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-attachments
+            Status: Enabled
+            ExpirationInDays: !Ref AttachmentRetentionDays
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  AttachmentsTlsOnly:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Attachments
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyPlainHttp
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt Attachments.Arn
+              - !Sub ${Attachments.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
 
   FunctionLogs:
     Type: AWS::Logs::LogGroup
@@ -68,9 +118,20 @@ Resources:
           RATE_LIMIT: !Ref RateLimit
           RATE_WINDOW_SECONDS: !Ref RateWindowSeconds
           WS_URL: !Sub ${WsApi.ApiEndpoint}/bus
+          BUCKET: !Ref Attachments
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Table
+        # Presigned URLs act with the Lambda's own rights, so it needs Put
+        # and Get although it only ever reads.
+        # ListBucket makes a missing object a 404 rather than a 403.
+        - Statement:
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject]
+              Resource: !Sub ${Attachments.Arn}/*
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Attachments.Arn
         - Statement:
             - Effect: Allow
               Action: execute-api:ManageConnections
@@ -224,3 +285,5 @@ Outputs:
     Value: !Ref WsApi
   TableName:
     Value: !Ref Table
+  AttachmentsBucket:
+    Value: !Ref Attachments

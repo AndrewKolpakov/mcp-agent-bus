@@ -71,11 +71,13 @@ def test_peers_and_tail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     _run(tmp_path, "--as", "alice", "send", "--to", "bob", "hi")
     capsys.readouterr()
     assert _run(tmp_path, "--as", "alice", "peers", "--json") == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "name": "bob",
-        "live": False,
-        "unread_by_them": 1,
-    }
+    peer = json.loads(capsys.readouterr().out)
+    assert (peer["name"], peer["live"], peer["unread_by_them"], peer["state"]) == (
+        "bob",
+        False,
+        1,
+        "offline",
+    )
     assert _run(tmp_path, "tail") == 0
     out = capsys.readouterr().out
     assert "alice -> bob [text]" in out
