@@ -72,7 +72,8 @@ async def main(stack: str) -> int:
                 claim = b.put("/session", json={"session": f"s-{tag}", "connection": conn})
                 check("bob claims the channel", claim.status_code == 200, claim.status_code)
                 peers = a.get("/peers").json()
-                check("alice sees bob live", peers == [{"name": bob, "live": True}], peers)
+                seen = [(p["name"], p["live"], p.get("state")) for p in peers]
+                check("alice sees bob live and idle", seen == [(bob, True, "idle")], peers)
 
                 started = time.monotonic()
                 sent = a.post("/events", json={"to": bob, "body": "smoke", "kind": "task"})

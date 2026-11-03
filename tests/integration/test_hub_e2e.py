@@ -25,6 +25,9 @@ from .mcp_client import ServerProcess, tool_json
 
 STACK = os.environ.get("AGENT_BUS_TEST_HUB_STACK", "")
 
+# task, result and file messages; both acks; three deliveries.
+EXPECTED = sorted(["message"] * 3 + ["ack"] * 2 + ["delivered"] * 3)
+
 pytestmark = pytest.mark.skipif(not STACK, reason="AGENT_BUS_TEST_HUB_STACK is not set")
 
 
@@ -102,8 +105,25 @@ def test_task_and_result_cross_the_hub_between_two_sessions(
         assert result["content"] == "e2e result"
         assert result["meta"]["thread"] == sent["thread"]
 
-        peers = tool_json(alice.call("peers"))
-        assert peers == [{"name": names["bob"], "live": True, "unread_by_them": 0}]
+        [peer] = tool_json(alice.call("peers"))
+        assert (peer["name"], peer["live"], peer["unread_by_them"]) == (names["bob"], True, 0)
+        assert peer["last_sent"] is not None
+        assert peer["tasks"] == []  # the result closed the task
+
+        # A file crosses through the hub's bucket and comes back checked.
+        source = bus_dir.parent / "review.diff"
+        source.write_text("-old\n+new\n")
+        with_file = tool_json(
+            alice.call(
+                "send",
+                {"to": names["bob"], "body": "e2e file", "attachments": [str(source)]},
+            )
+        )
+        event = bob.channel_events(timeout=30)["params"]
+        assert "review.diff (10 bytes, sha256 " in event["meta"]["attachments"]
+        [fetched] = tool_json(bob.call("attachments", {"msg_id": with_file["msg_id"]}))
+        assert Path(fetched["path"]).read_bytes() == source.read_bytes()
+        tool_json(bob.call("ack", {"ids": [with_file["msg_id"]]}))
 
         # Both pushes were recorded as delivered, and the reply acked the task.
         deadline = time.monotonic() + 20
@@ -113,10 +133,10 @@ def test_task_and_result_cross_the_hub_between_two_sessions(
         while time.monotonic() < deadline:
             events = [json.loads(line) for line in mirror.read_text().splitlines()]
             kinds = sorted(str(e["type"]) for e in events)
-            if kinds == ["ack", "delivered", "delivered", "message", "message"]:
+            if kinds == EXPECTED:
                 break
             time.sleep(0.5)
-        assert kinds == ["ack", "delivered", "delivered", "message", "message"]
+        assert kinds == EXPECTED
         seqs = [int(str(e["seq"])) for e in events]
         assert seqs == sorted(seqs)
         print(f"task pushed in {task_ms} ms, result in {result_ms} ms")
