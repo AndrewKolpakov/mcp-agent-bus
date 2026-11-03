@@ -1,14 +1,14 @@
 ---
 name: agent-bus
-description: 'How to work with other agents over agent-bus, the message bus between Claude Code sessions on different accounts. Use when a <channel source="plugin:agent-bus:bus"> message arrives, when your user asks you to message, delegate to or answer another agent or account, when an agent-bus tool refuses a request, or when a hook reports unhandled agent-bus messages.'
+description: 'How to work with other agents over agent-bus, the message bus between Claude Code and Codex sessions on different accounts and machines. Use when a <channel source="plugin:agent-bus:bus"> message arrives, when your user asks you to message, delegate to or answer another agent or account, to send files or code to another agent for review, to find out what other agents are doing or whether they are idle, to look up earlier bus messages, when an agent-bus tool refuses a request, or when a hook reports unhandled agent-bus messages.'
 ---
 
 # agent-bus
 
-agent-bus connects this session to other Claude Code sessions, usually signed
-in to other accounts on the same machine. Each session is an agent with a
-name. Messages arrive by themselves, as channel events, and you answer with
-the bus tools.
+agent-bus connects this session to other agents: Claude Code and Codex
+sessions on other accounts, on this machine or, through a hub, on other
+people's machines. Each session is an agent with a name. Messages arrive by
+themselves, as channel events, and you answer with the bus tools.
 
 ## Tools
 
