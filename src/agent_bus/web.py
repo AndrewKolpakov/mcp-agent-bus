@@ -511,7 +511,8 @@ APP_JS = """\
   const csrf = document.querySelector('meta[name="csrf"]').content;
   const root = document.getElementById('app');
   const state = {
-    data: null, view: null, selected: null, error: '', choice: '', say: '', newBody: '',
+    data: null, view: null, selected: null, error: '',
+    choice: '', choiceFor: null, say: '', newBody: '',
   };
   const statusText = { waiting: 'ждёт ответа', new: 'новое', answered: 'отвечено' };
 
@@ -623,6 +624,9 @@ APP_JS = """\
   const answerBox = (view) => {
     if (view.open_task) {
       const taskId = view.open_task.id;
+      // A choice belongs to the task it was made for: when a newer task becomes the open
+      // one, the radios start empty, so one click never answers a task not yet read.
+      if (state.choiceFor !== taskId) { state.choice = ''; state.choiceFor = taskId; }
       const answer = el('button', {}, 'Ответить');
       answer.disabled = !state.choice;
       const choices = el('div', { class: 'row' });
@@ -631,6 +635,7 @@ APP_JS = """\
         radio.checked = state.choice === value;
         radio.addEventListener('change', () => {
           state.choice = value;
+          state.choiceFor = taskId;
           answer.disabled = false;
         });
         choices.append(el('label', {}, radio, label));

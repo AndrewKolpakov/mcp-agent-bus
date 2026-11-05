@@ -538,6 +538,17 @@ def test_app_js_render_keeps_scroll_drafts_and_focus_across_a_refresh(client: Cl
     assert "typing" not in text
 
 
+def test_app_js_a_radio_choice_never_carries_to_a_newer_open_task(client: Client) -> None:
+    # A poll can make a newer task the open one; a Да chosen for the older task must not
+    # stay checked for it, or one click answers a task the owner has not read.
+    _, _, js = client.request("GET", "/app.js")
+    box = _js_function(js.decode(), "answerBox")
+    reset = "if (state.choiceFor !== taskId) { state.choice = ''; state.choiceFor = taskId; }"
+    assert reset in box
+    assert box.index(reset) < box.index("radio.checked = state.choice === value;")
+    assert "state.choiceFor = taskId;" in box.split("addEventListener('change'", 1)[1]
+
+
 def test_a_message_after_the_thread_was_opened_is_acked_by_the_next_thread_call(
     client: Client, owner: Bus, personal: Bus
 ) -> None:
