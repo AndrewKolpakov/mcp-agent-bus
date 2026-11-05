@@ -4,6 +4,7 @@ import http.client
 import json
 import re
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -455,14 +456,578 @@ def test_app_js_has_the_local_banner_and_no_innerhtml(client: Client) -> None:
     assert b".banner-local" in css
 
 
-def test_app_js_has_the_answer_controls_and_no_kind_select(client: Client) -> None:
+def test_app_js_is_the_messenger_page(client: Client) -> None:
     _, _, js = client.request("GET", "/app.js")
     text = js.decode()
-    for label in ("Да", "Нет", "Ответить", "Отправить"):
-        assert f"'{label}'" in text
+    for label in (
+        "ждёт ответа",
+        "новое",
+        "отвечено",
+        "Да",
+        "Нет",
+        "Ответить",
+        "Отправить",
+        "Вы ответили",
+        "Написать",
+    ):
+        assert label in text, label
+    for route in ("/api/threads", "/api/thread", "/api/say", "/api/reply", "/api/send"):
+        assert route in text, route
+    # the page no longer lists the inbox or acks in bulk
+    assert "Ack shown" not in text
+    assert "/api/inbox" not in text
+    assert "/api/ack" not in text
+    assert "innerHTML" not in text
     assert "el('select'" not in text
     assert "<select" not in text
-    assert "innerHTML" not in text
+
+
+def test_app_js_labels_the_new_message_area_with_the_peer_name(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    # the label is built from the peer name the server sends, not a fixed word
+    assert re.search(r"Написать\s*['\"`]?\s*\+\s*[\w.]*peer\b", text)
+    assert "Написать personal" not in text
+
+
+def test_app_css_stacks_the_panes_on_narrow_screens(client: Client) -> None:
+    _, _, css = client.request("GET", "/app.css")
+    assert b"@media" in css
+
+
+# --- messenger layout: /api/threads, /api/thread, /api/say ---------------------------------
+
+
+def threads_of(client: Client) -> list[dict[str, Any]]:
+    data = client.get_json("/api/threads")
+    assert isinstance(data["threads"], list)
+    return list(data["threads"])
+
+
+def thread_row(client: Client, thread: str) -> dict[str, Any]:
+    return next(t for t in threads_of(client) if t["thread"] == thread)
+
+
+def open_thread(client: Client, thread: str) -> dict[str, Any]:
+    status, view = client.post("/api/thread", {"thread": thread})
+    assert status == 200, view
+    assert isinstance(view, dict)
+    return view
+
+
+def test_threads_envelope_has_me_peer_and_backend(client: Client, serve: ServerFactory) -> None:
+    data = client.get_json("/api/threads")
+    assert data["me"] == "owner"
+    assert data["peer"] == "personal"
+    assert data["backend"] == {"mode": "local", "hub": None}
+    assert data["threads"] == []
+    hub = serve(hub="https://hub.example/x")
+    assert hub.get_json("/api/threads")["backend"] == {
+        "mode": "hub",
+        "hub": "https://hub.example/x",
+    }
+
+
+def test_threads_list_only_threads_involving_me(
+    client: Client, owner_store: Store, owner: Bus, personal: Bus
+) -> None:
+    legion = Bus(owner_store, "legion", rate_limit=1000)
+    mine_in = personal.send("owner", "to me")
+    mine_out = owner.send("legion", "from me")
+    foreign = legion.send("personal", "not about the owner")
+    legion.send("personal", "still not", reply_to=foreign.id)
+
+    ids = [t["thread"] for t in threads_of(client)]
+    assert sorted(ids) == sorted([mine_in.thread, mine_out.thread])
+    assert foreign.thread not in ids
+
+
+def test_threads_are_sorted_newest_activity_first(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    a = personal.send("owner", "thread a")
+    time.sleep(0.01)
+    b = personal.send("owner", "thread b")
+    time.sleep(0.01)
+    c = personal.send("owner", "thread c")
+    assert [t["thread"] for t in threads_of(client)] == [c.thread, b.thread, a.thread]
+
+    time.sleep(0.01)
+    personal.send("owner", "a again", reply_to=a.id)
+    rows = threads_of(client)
+    assert [t["thread"] for t in rows] == [a.thread, c.thread, b.thread]
+    times = [t["last_time"] for t in rows]
+    assert times == sorted(times, reverse=True)
+    assert re.match(r"\d{4}-\d{2}-\d{2}T", rows[0]["last_time"])
+
+
+def test_last_time_is_the_newest_message_of_the_thread(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "q")
+    time.sleep(0.01)
+    owner.send("personal", "a", reply_to=first.id)
+    row = thread_row(client, first.thread)
+    view = open_thread(client, first.thread)
+    assert row["last_time"] == view["messages"][-1]["time"]
+    assert row["last_time"] != view["messages"][0]["time"]
+
+
+def test_title_is_the_stripped_first_line_of_the_opening_message(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    opening = personal.send("owner", "  Deploy plan  \nsecond line\nthird")
+    owner.send("personal", "a later reply is not the title", reply_to=opening.id)
+    assert thread_row(client, opening.thread)["title"] == "Deploy plan"
+
+
+def test_title_is_at_most_120_characters(client: Client, personal: Bus) -> None:
+    opening = personal.send("owner", "x" * 300)
+    title = thread_row(client, opening.thread)["title"]
+    assert 0 < len(title) <= 120
+    assert set(title) <= {"x"}
+
+
+def test_counterpart_of_an_incoming_and_of_my_own_opening(
+    client: Client, owner: Bus, personal: Bus, owner_store: Store
+) -> None:
+    legion = Bus(owner_store, "legion", rate_limit=1000)
+    incoming = personal.send("owner", "from personal")
+    outgoing = owner.send("legion", "to legion")
+    legion.send("owner", "legion answers", reply_to=outgoing.id)
+    # a third party joins the incoming thread later: the counterpart stays the opener's other side
+    owner.send("personal", "my answer", reply_to=incoming.id)
+
+    assert thread_row(client, incoming.thread)["counterpart"] == "personal"
+    assert thread_row(client, outgoing.thread)["counterpart"] == "legion"
+
+
+def test_pure_helpers_thread_counterpart_and_status(owner: Bus, personal: Bus) -> None:
+    opening = owner.send("personal", "mine first")
+    personal.send("owner", "task", kind="task", reply_to=opening.id)
+    messages = owner.history(thread=opening.thread, last=None)
+    assert web.thread_counterpart(messages, "owner") == "personal"
+    assert web.thread_counterpart(messages, "personal") == "owner"
+    assert web.thread_status(messages, "owner", set()) == "waiting"
+    assert web.answered_result(messages, "owner", messages[1].id) is None
+    result = owner.send("personal", "да", kind="result", reply_to=messages[1].id)
+    messages = owner.history(thread=opening.thread, last=None)
+    found = web.answered_result(messages, "owner", messages[1].id)
+    assert found is not None
+    assert found.id == result.id
+    assert web.thread_status(messages, "owner", {messages[1].id}) == "answered"
+
+
+def test_status_waiting_for_a_task_without_my_result(client: Client, personal: Bus) -> None:
+    task = personal.send("owner", "please decide", kind="task")
+    row = thread_row(client, task.thread)
+    assert row["status"] == "waiting"
+    assert row["unread"] == 1
+
+
+def test_a_text_reply_does_not_clear_waiting(client: Client, owner: Bus, personal: Bus) -> None:
+    task = personal.send("owner", "please decide", kind="task")
+    owner.send("personal", "one question first", kind="text", reply_to=task.id)
+    assert thread_row(client, task.thread)["status"] == "waiting"
+
+
+def test_opening_a_thread_acks_but_a_task_stays_waiting(client: Client, personal: Bus) -> None:
+    task = personal.send("owner", "please decide", kind="task")
+    open_thread(client, task.thread)
+    row = thread_row(client, task.thread)
+    assert row["unread"] == 0
+    assert row["status"] == "waiting"
+
+
+def test_status_new_for_an_unread_text(client: Client, personal: Bus) -> None:
+    text = personal.send("owner", "fyi")
+    row = thread_row(client, text.thread)
+    assert row["status"] == "new"
+    assert row["unread"] == 1
+
+
+def test_status_answered_once_everything_is_read_and_no_task_is_open(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    text = personal.send("owner", "fyi")
+    open_thread(client, text.thread)
+    row = thread_row(client, text.thread)
+    assert (row["status"], row["unread"]) == ("answered", 0)
+
+    mine = owner.send("personal", "I started this")
+    assert thread_row(client, mine.thread)["status"] == "answered"
+
+
+def test_status_answered_after_a_result_reply(client: Client, personal: Bus) -> None:
+    task = personal.send("owner", "ok?", kind="task")
+    status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
+    assert status == 200
+    row = thread_row(client, task.thread)
+    assert (row["status"], row["unread"]) == ("answered", 0)
+
+
+def test_status_new_again_when_a_fresh_message_arrives_after_answering(
+    client: Client, personal: Bus
+) -> None:
+    task = personal.send("owner", "ok?", kind="task")
+    client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
+    personal.send("owner", "follow-up", kind="task", reply_to=task.id)
+    # the follow-up is a task of its own without my result: waiting beats new
+    assert thread_row(client, task.thread)["status"] == "waiting"
+
+
+def test_unread_counts_only_messages_to_me_not_acked(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "one")
+    personal.send("owner", "two", reply_to=first.id)
+    personal.send("owner", "three", reply_to=first.id)
+    owner.send("personal", "mine does not count", reply_to=first.id)
+    other = personal.send("owner", "other thread")
+    owner.ack(first.id)
+    assert thread_row(client, first.thread)["unread"] == 2
+    assert thread_row(client, other.thread)["unread"] == 1
+
+
+def test_listing_threads_does_not_ack(client: Client, owner: Bus, personal: Bus) -> None:
+    msg = personal.send("owner", "still unread")
+    threads_of(client)
+    threads_of(client)
+    assert [m.id for m in owner.inbox()] == [msg.id]
+
+
+def test_thread_view_is_oldest_first_with_mine_flags(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "question?")
+    second = owner.send("personal", "my answer", reply_to=first.id)
+    third = personal.send("owner", "thanks", reply_to=second.id)
+
+    view = open_thread(client, first.thread)
+    assert view["thread"] == first.thread
+    assert view["counterpart"] == "personal"
+    msgs = view["messages"]
+    assert [m["id"] for m in msgs] == [first.id, second.id, third.id]
+    assert [m["mine"] for m in msgs] == [False, True, False]
+    assert [m["from"] for m in msgs] == ["personal", "owner", "personal"]
+    assert [m["to"] for m in msgs] == ["owner", "personal", "owner"]
+    assert [m["body"] for m in msgs] == ["question?", "my answer", "thanks"]
+    assert [m["reply_to"] for m in msgs] == [None, first.id, second.id]
+    assert [m["kind"] for m in msgs] == ["text", "text", "text"]
+    assert all(re.match(r"\d{4}-\d{2}-\d{2}T", m["time"]) for m in msgs)
+    assert all(m["attachments"] == [] for m in msgs)
+
+
+def test_thread_view_lists_attachment_names(client: Client, personal: Bus, tmp_path: Path) -> None:
+    f = tmp_path / "notes.txt"
+    f.write_text("hello")
+    msg = personal.send("owner", "see file", attachments=[f])
+    view = open_thread(client, msg.thread)
+    assert view["messages"][0]["attachments"] == ["notes.txt"]
+
+
+def test_opening_a_thread_acks_only_that_threads_unread_to_me(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    a1 = personal.send("owner", "a1")
+    a2 = personal.send("owner", "a2", reply_to=a1.id)
+    b1 = personal.send("owner", "b1")
+    assert {m.id for m in owner.inbox()} == {a1.id, a2.id, b1.id}
+
+    open_thread(client, a1.thread)
+    assert [m.id for m in owner.inbox()] == [b1.id]
+    assert thread_row(client, a1.thread)["unread"] == 0
+    assert thread_row(client, b1.thread)["unread"] == 1
+
+
+def test_open_task_is_the_newest_unanswered_task_to_me(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    t1 = personal.send("owner", "first task", kind="task")
+    t2 = personal.send("owner", "second task", kind="task", reply_to=t1.id)
+    personal.send("owner", "a plain note", kind="text", reply_to=t1.id)
+    assert open_thread(client, t1.thread)["open_task"] == {"id": t2.id}
+
+    owner.send("personal", "да", kind="result", reply_to=t2.id)
+    view = open_thread(client, t1.thread)
+    assert view["open_task"] == {"id": t1.id}
+    assert view["answered_task"] is None
+
+
+def test_open_task_is_null_without_a_task(client: Client, personal: Bus) -> None:
+    text = personal.send("owner", "just talk")
+    view = open_thread(client, text.thread)
+    assert view["open_task"] is None
+    assert view["answered_task"] is None
+
+
+def test_a_text_reply_leaves_the_task_open(client: Client, owner: Bus, personal: Bus) -> None:
+    task = personal.send("owner", "decide", kind="task")
+    owner.send("personal", "a remark", kind="text", reply_to=task.id)
+    assert open_thread(client, task.thread)["open_task"] == {"id": task.id}
+
+
+def test_answered_task_carries_my_result_body(client: Client, owner: Bus, personal: Bus) -> None:
+    task = personal.send("owner", "decide", kind="task")
+    owner.send("personal", "нет", kind="result", reply_to=task.id)
+    view = open_thread(client, task.thread)
+    assert view["open_task"] is None
+    assert view["answered_task"] == {"id": task.id, "answer": "нет"}
+
+
+def test_answered_task_is_the_newest_task_that_has_my_result(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    t1 = personal.send("owner", "first", kind="task")
+    owner.send("personal", "да", kind="result", reply_to=t1.id)
+    t2 = personal.send("owner", "second", kind="task", reply_to=t1.id)
+    owner.send("personal", "нет", kind="result", reply_to=t2.id)
+    view = open_thread(client, t1.thread)
+    assert view["open_task"] is None
+    assert view["answered_task"] == {"id": t2.id, "answer": "нет"}
+
+
+def test_unknown_thread_is_a_400(client: Client) -> None:
+    status, data = client.post("/api/thread", {"thread": "nope"})
+    assert status == 400
+    assert data["error"]
+
+
+def test_a_thread_not_involving_me_is_a_400_and_acks_nothing(
+    client: Client, owner_store: Store, owner: Bus, personal: Bus
+) -> None:
+    legion = Bus(owner_store, "legion", rate_limit=1000)
+    foreign = legion.send("personal", "private to them")
+    status, data = client.post("/api/thread", {"thread": foreign.thread})
+    assert status == 400
+    assert data["error"]
+    assert "private to them" not in json.dumps(data)
+    assert [m.id for m in personal.inbox()] == [foreign.id]
+
+
+def test_thread_without_a_thread_field_is_a_400(client: Client) -> None:
+    status, data = client.post("/api/thread", {})
+    assert status == 400
+    assert data["error"]
+
+
+@pytest.mark.parametrize("kind", ["task", "text"])
+def test_say_mode_reply_on_a_task_or_text(client: Client, personal: Bus, kind: str) -> None:
+    msg = personal.send("owner", "hello", kind=kind)  # type: ignore[arg-type]
+    view = open_thread(client, msg.thread)
+    assert view["say"] == {"mode": "reply", "reply_to": msg.id}
+
+
+def test_say_mode_reply_targets_the_latest_message_to_me(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "one")
+    personal.send("owner", "two", reply_to=first.id)
+    last = personal.send("owner", "three", kind="task", reply_to=first.id)
+    owner.send("personal", "my own newest message", reply_to=last.id)
+    assert open_thread(client, first.thread)["say"] == {"mode": "reply", "reply_to": last.id}
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_say_mode_new_after_a_result_or_await_human(
+    client: Client, personal: Bus, kind: str
+) -> None:
+    msg = personal.send("owner", "the end", kind=kind)  # type: ignore[arg-type]
+    say = open_thread(client, msg.thread)["say"]
+    assert say == {
+        "mode": "new",
+        "hint": "Ответ уйдёт новым сообщением: на результат ответить нельзя.",
+    }
+
+
+def test_say_mode_new_when_the_thread_has_no_incoming(client: Client, owner: Bus) -> None:
+    mine = owner.send("personal", "I wrote first")
+    say = open_thread(client, mine.thread)["say"]
+    assert say["mode"] == "new"
+    assert say["hint"].startswith("Ответ уйдёт новым сообщением")
+    assert say["hint"].endswith("в этой ветке нет входящих.")
+
+
+def test_say_in_mode_reply_sends_text_with_reply_to(client: Client, personal: Bus) -> None:
+    msg = personal.send("owner", "tell me", kind="task")
+    status, data = client.post("/api/say", {"thread": msg.thread, "body": "here you go"})
+    assert status == 200
+    assert data["mode"] == "reply"
+    (got,) = personal.inbox()
+    assert got.id == data["id"]
+    assert (got.kind, got.body, got.reply_to) == ("text", "here you go", msg.id)
+    assert got.sender == "owner"
+    assert got.thread == msg.thread
+
+
+def test_say_in_mode_reply_goes_to_the_original_sender(
+    client: Client, owner_store: Store, personal: Bus
+) -> None:
+    msg = personal.send("owner", "hello")
+    status, _ = client.post("/api/say", {"thread": msg.thread, "body": "hi"})
+    assert status == 200
+    assert [m.body for m in personal.inbox()] == ["hi"]
+
+
+def test_say_in_mode_new_sends_a_fresh_message_to_the_counterpart(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    result = personal.send("owner", "all done", kind="result")
+    status, data = client.post("/api/say", {"thread": result.thread, "body": "thanks, one more"})
+    assert status == 200
+    assert data["mode"] == "new"
+    (got,) = personal.inbox()
+    assert got.id == data["id"]
+    assert (got.kind, got.body, got.sender, got.to) == (
+        "text",
+        "thanks, one more",
+        "owner",
+        "personal",
+    )
+    assert got.reply_to is None
+    assert got.thread == got.id
+    assert got.thread != result.thread
+
+
+def test_say_in_mode_new_without_incoming_goes_to_the_counterpart(
+    client: Client, owner_store: Store, owner: Bus
+) -> None:
+    legion = Bus(owner_store, "legion", rate_limit=1000)
+    mine = owner.send("legion", "ping")
+    status, data = client.post("/api/say", {"thread": mine.thread, "body": "ping again"})
+    assert status == 200
+    assert data["mode"] == "new"
+    got = next(m for m in legion.inbox() if m.id == data["id"])
+    assert (got.body, got.reply_to, got.kind, got.to) == ("ping again", None, "text", "legion")
+
+
+def test_say_on_an_unknown_thread_or_empty_body_is_a_400(client: Client, personal: Bus) -> None:
+    status, data = client.post("/api/say", {"thread": "nope", "body": "x"})
+    assert status == 400
+    assert data["error"]
+    msg = personal.send("owner", "hi")
+    status, data = client.post("/api/say", {"thread": msg.thread, "body": "   "})
+    assert status == 400
+    assert data["error"]
+    assert personal.inbox() == []
+
+
+def test_say_with_a_secret_is_refused_with_the_leak_scan_message(
+    client: Client, personal: Bus
+) -> None:
+    secret = "gh" + "p_" + "A" * 36
+    msg = personal.send("owner", "hi")
+    status, data = client.post("/api/say", {"thread": msg.thread, "body": f"here: {secret}"})
+    assert status == 400
+    assert "GitHub token" in data["error"]
+    assert secret not in data["error"]
+    assert personal.inbox() == []
+
+
+def test_a_second_result_to_the_same_task_is_a_409_and_stores_nothing(
+    client: Client, personal: Bus
+) -> None:
+    task = personal.send("owner", "ok?", kind="task")
+    status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
+    assert status == 200
+    status, data = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "нет"})
+    assert status == 409
+    assert data == {"error": "already answered"}
+    results = [m for m in personal.inbox() if m.kind == "result"]
+    assert [m.body for m in results] == ["да"]
+    assert len(personal.inbox()) == 1
+
+
+def test_a_text_reply_after_a_result_is_still_allowed(client: Client, personal: Bus) -> None:
+    task = personal.send("owner", "ok?", kind="task")
+    status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
+    assert status == 200
+    status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "text", "body": "and also"})
+    assert status == 200
+    assert [(m.kind, m.body) for m in personal.inbox()] == [("result", "да"), ("text", "and also")]
+
+
+def test_a_result_to_another_task_is_not_blocked_by_an_earlier_answer(
+    client: Client, personal: Bus
+) -> None:
+    t1 = personal.send("owner", "first", kind="task")
+    t2 = personal.send("owner", "second", kind="task", reply_to=t1.id)
+    assert client.post("/api/reply", {"msg_id": t1.id, "kind": "result", "body": "да"})[0] == 200
+    assert client.post("/api/reply", {"msg_id": t2.id, "kind": "result", "body": "нет"})[0] == 200
+
+
+def test_send_still_opens_a_new_thread_that_appears_in_the_list(
+    client: Client, personal: Bus
+) -> None:
+    status, data = client.post("/api/send", {"body": "hello personal\nmore"})
+    assert status == 200
+    row = thread_row(client, data["id"])
+    assert row["title"] == "hello personal"
+    assert row["counterpart"] == "personal"
+    assert row["status"] == "answered"
+
+
+def test_threads_sync_runs_first_and_failure_is_a_503(serve: ServerFactory, personal: Bus) -> None:
+    class HubDownError(Exception):
+        pass
+
+    def deliver() -> None:
+        personal.send("owner", "arrived in sync")
+
+    client = serve(sync=deliver)
+    assert [t["title"] for t in threads_of(client)] == ["arrived in sync"]
+
+    def boom() -> None:
+        raise HubDownError("secret detail")
+
+    failing = serve(sync=boom)
+    status, _, data = failing.request("GET", "/api/threads")
+    assert status == 503
+    assert json.loads(data) == {"error": "HubDownError"}
+
+
+def test_wrong_host_header_is_forbidden_on_threads_and_thread_posts(client: Client) -> None:
+    for host in ("evil.example", f"evil.example:{client.port}", "127.0.0.1:1", "127.0.0.1"):
+        status, _, _ = client.request("GET", "/api/threads", host=host)
+        assert status == 403, host
+        for path in ("/api/thread", "/api/say"):
+            status, _, _ = client.request("POST", path, {"thread": "x", "body": "x"}, host=host)
+            assert status == 403, (host, path)
+
+
+def test_localhost_host_header_is_accepted_on_threads(client: Client) -> None:
+    status, _, _ = client.request("GET", "/api/threads", host=f"localhost:{client.port}")
+    assert status == 200
+
+
+def test_threads_carry_the_security_headers(client: Client) -> None:
+    status, headers, _ = client.request("GET", "/api/threads")
+    assert status == 200
+    assert headers["Content-Security-Policy"] == "default-src 'self'"
+    assert headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("csrf", [None, "wrong-token"])
+@pytest.mark.parametrize(
+    ("path", "payload_of"),
+    [
+        ("/api/thread", lambda m: {"thread": m.thread}),
+        ("/api/say", lambda m: {"thread": m.thread, "body": "sneaky"}),
+    ],
+)
+def test_thread_and_say_without_the_csrf_token_are_forbidden(
+    client: Client,
+    owner: Bus,
+    personal: Bus,
+    path: str,
+    payload_of: Callable[[Any], dict[str, str]],
+    csrf: str | None,
+) -> None:
+    msg = personal.send("owner", "hello")
+    status, _, _ = client.request("POST", path, payload_of(msg), csrf=csrf)
+    assert status == 403
+    assert [m.id for m in owner.inbox()] == [msg.id]
+    assert [m.id for m in personal.inbox()] == []
 
 
 @pytest.mark.parametrize("answer", ["да", "нет"])
