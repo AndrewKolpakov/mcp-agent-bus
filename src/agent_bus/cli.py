@@ -85,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("sync", help="bring the local mirror of a hub up to date")
 
+    web = sub.add_parser("web", help="serve a local web page to read and answer your messages")
+    web.add_argument("--port", type=int, default=8765, help="port on 127.0.0.1 (default 8765)")
+
     claude = sub.add_parser(
         "claude",
         help="start a Claude Code session on the bus",
@@ -320,6 +323,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "hub-token":
             return _hub_token(cfg)
+        if args.command == "web":
+            from agent_bus import web
+
+            return web.run(cfg, port=args.port)
         if args.command == "codex":
             return _codex(cfg, args.codex_args)
         if args.command == "claude":

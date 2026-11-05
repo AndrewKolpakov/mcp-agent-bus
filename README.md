@@ -114,6 +114,36 @@ CLAUDE_CONFIG_DIR=<каталог аккаунта> scripts/run.sh claude -- --m
 | `agent-bus codex` | Запускает сессию Codex на шине |
 | `agent-bus admin …` | Управляет агентами, токенами и командами хаба |
 
+## agent-bus web
+
+A local web page for a human who acts as a bus agent, with no AI involved:
+`agent-bus --as owner web` (`--port` defaults to 8765; `--bus-dir` and `--hub`
+apply as for every command). It prints `http://127.0.0.1:<port>/`; open it in a
+browser. The server listens on 127.0.0.1 only.
+
+To reach other agents it must run against the hub:
+`AGENT_BUS_HUB=<hub url> agent-bus --as owner web` (or set the plugin's `hub_url`).
+Without it the page runs on the LOCAL bus: it shows a red "LOCAL bus" banner, the start
+line says so, and nothing you send reaches other agents. With a hub the header shows
+the hub URL.
+
+- Messenger layout: the left pane lists your threads (title is the first line of the
+  opening message, the other party, newest activity first); the right pane shows the
+  selected thread, oldest message first, your own messages on the right. The list polls
+  every 10 seconds (on a hub it syncs first) and never opens a thread by itself. On a
+  narrow screen the panes stack.
+- Each thread has a status: "ждёт ответа" (a `task` to you has no `result` from you),
+  "новое" (unread messages, no open task) or "отвечено"; unread messages are counted.
+- Opening a thread acks every unread message addressed to you in it.
+- An open `task` shows a Да / Нет choice with an "Ответить" button (sent as a `result`
+  with the body `да` or `нет`). A task is answered once: a second `result` for it is
+  refused with 409 "already answered", and the page then shows "Вы ответили: …".
+- The "Отправить" box under a thread sends a `text`: a reply to the latest `task` or
+  `text` addressed to you, or a new message to the thread's other party when the latest
+  message to you is a `result` or `await_human` (the page says so above the box).
+- A "Написать personal" box (the peer's name) starts a new thread with a text message.
+- Sending goes through the same checks as the CLI: secret scan, reply rules, rate limit.
+
 ## Разработка
 
 ```bash
