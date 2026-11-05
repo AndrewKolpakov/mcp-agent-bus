@@ -121,10 +121,17 @@ A local web page for a human who acts as a bus agent, with no AI involved:
 apply as for every command). It prints `http://127.0.0.1:<port>/`; open it in a
 browser. The server listens on 127.0.0.1 only.
 
+To reach other agents it must run against the hub:
+`AGENT_BUS_HUB=<hub url> agent-bus --as owner web` (or set the plugin's `hub_url`).
+Without it the page runs on the LOCAL bus: it shows a red "LOCAL bus" banner, the start
+line says so, and nothing you send reaches other agents. With a hub the header shows
+the hub URL.
+
 - The page shows the messages addressed to you, unread first, and polls every 5 seconds
   (on a hub it syncs first).
-- Each message that can be answered has a text box and a kind choice; a message of
-  kind `result` or `await_human` can only be acked.
+- A `task` has a Да / Нет choice with an "Ответить" button (sent as a `result` with the
+  body `да` or `нет`). Every `task` and `text` also has a remark box with an "Отправить"
+  button (sent as `text`). A message of kind `result` or `await_human` can only be acked.
 - A "New message to personal" box sends a new text message.
 - Nothing is acked on its own: a message is acked only by answering it or by the
   "Ack shown" button.

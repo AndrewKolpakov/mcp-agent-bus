@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.server
 import json
 import secrets
+import sys
 import threading
 from collections.abc import Callable
 from typing import Any, cast
@@ -41,6 +42,7 @@ class WebServer(http.server.ThreadingHTTPServer):
     bus: Bus
     sync: Callable[[], object] | None
     peer: str
+    hub: str | None
     csrf: str
     lock: threading.Lock
     daemon_threads = True
@@ -178,7 +180,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             }
             for m in [*unread, *read]
         ]
-        self._json(200, {"me": me, "peer": server.peer, "messages": shown})
+        backend = (
+            {"mode": "hub", "hub": server.hub} if server.hub else {"mode": "local", "hub": None}
+        )
+        self._json(200, {"me": me, "peer": server.peer, "backend": backend, "messages": shown})
 
     def _text(self, data: dict[str, Any], key: str) -> str:
         value = data.get(key)
@@ -225,6 +230,7 @@ def make_server(
     port: int = DEFAULT_PORT,
     sync: Callable[[], object] | None = None,
     peer: str = DEFAULT_PEER,
+    hub: str | None = None,
 ) -> WebServer:
     if host not in LOOPBACK_HOSTS:
         raise ValueError(f"web binds to loopback only ({', '.join(LOOPBACK_HOSTS)}), not {host!r}")
@@ -232,6 +238,7 @@ def make_server(
     server.bus = bus
     server.sync = sync
     server.peer = peer
+    server.hub = hub
     server.csrf = secrets.token_urlsafe(32)
     server.lock = threading.Lock()
     return server
@@ -249,12 +256,21 @@ def run(cfg: config.Config, *, port: int = DEFAULT_PORT) -> int:
         rate_window=cfg.rate_window,
     )
     store = backend.store
+    is_hub = isinstance(store, HubStore)
     sync = store.sync if isinstance(store, HubStore) else None
-    server = make_server(bus, port=port, sync=sync)
-    print(
-        f"agent-bus web: http://127.0.0.1:{server.server_address[1]}/ as {bus.me}",
-        flush=True,
-    )
+    hub = cfg.hub if is_hub else None
+    server = make_server(bus, port=port, sync=sync, hub=hub)
+    start = f"agent-bus web: http://127.0.0.1:{server.server_address[1]}/ as {bus.me}"
+    if hub:
+        print(f"{start} — hub {hub}", flush=True)
+    else:
+        print(f"{start} — LOCAL bus (not connected to a hub; set AGENT_BUS_HUB)", flush=True)
+        print(
+            "WARNING: LOCAL bus: messages stay on this machine and never reach a hub."
+            " Set AGENT_BUS_HUB (or the plugin's hub_url) and restart.",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -293,6 +309,9 @@ h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
 .reply { margin: .5rem 0 0 1rem; padding-left: .6rem; border-left: 3px solid #b6c8e8; }
 .row { display: flex; gap: .5rem; margin-top: .5rem; align-items: flex-start; }
 textarea { width: 100%; min-height: 3.5rem; font: inherit; box-sizing: border-box; }
+.banner-local { background: #b00020; color: #fff; padding: .6rem .8rem; border-radius: 6px;
+  margin: 0 0 .7rem; font-weight: 600; }
+.hub { color: #555; font-size: .85rem; margin: 0 0 .5rem; }
 .error { color: #b00020; margin: .4rem 0; white-space: pre-wrap; }
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 """
@@ -371,21 +390,38 @@ APP_JS = """\
       reply.append(el('div', { class: 'body' }, r.body));
       node.append(reply);
     }
+    if (m.kind === 'task' && m.reply_kinds.includes('result')) {
+      const answer = el('button', {}, 'Ответить');
+      answer.disabled = !state.kinds[m.id];
+      const choices = el('div', { class: 'row' });
+      for (const [label, value] of [['Да', 'да'], ['Нет', 'нет']]) {
+        const radio = el('input', { type: 'radio', name: 'answer-' + m.id, value: value });
+        radio.checked = state.kinds[m.id] === value;
+        radio.addEventListener('change', () => {
+          state.kinds[m.id] = value;
+          answer.disabled = false;
+        });
+        choices.append(el('label', {}, radio, label));
+      }
+      answer.addEventListener('click', () => act(
+        '/api/reply',
+        { msg_id: m.id, kind: 'result', body: state.kinds[m.id] },
+        () => { delete state.kinds[m.id]; },
+      ));
+      choices.append(answer);
+      node.append(choices);
+    }
     if (m.answerable) {
-      const area = el('textarea', { placeholder: 'Answer ' + m.from });
+      const area = el('textarea', { placeholder: 'Remark to ' + m.from });
       area.value = state.drafts[m.id] || '';
       area.addEventListener('input', () => { state.drafts[m.id] = area.value; });
-      const select = el('select');
-      for (const kind of m.reply_kinds) select.append(el('option', { value: kind }, kind));
-      select.value = state.kinds[m.id] || m.reply_kinds[0];
-      select.addEventListener('change', () => { state.kinds[m.id] = select.value; });
-      const send = el('button', {}, 'Send');
+      const send = el('button', {}, 'Отправить');
       send.addEventListener('click', () => act(
         '/api/reply',
-        { msg_id: m.id, kind: select.value, body: area.value },
+        { msg_id: m.id, kind: 'text', body: area.value },
         () => { delete state.drafts[m.id]; },
       ));
-      node.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, select, send));
+      node.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
     }
     return node;
   };
@@ -400,6 +436,15 @@ APP_JS = """\
     const data = state.data;
     root.replaceChildren();
     root.append(el('h1', {}, data ? 'agent-bus: ' + data.me : 'agent-bus'));
+    if (data && data.backend) {
+      if (data.backend.mode === 'hub') {
+        root.append(el('div', { class: 'hub' }, 'hub: ' + data.backend.hub));
+      } else {
+        root.append(el('div', { class: 'banner-local' },
+          "LOCAL bus — not connected to a hub. Messages stay on this machine. "
+            + "Set AGENT_BUS_HUB (or the plugin's hub_url) and restart."));
+      }
+    }
     const err = el('div', { class: 'error', id: 'error' }, state.error);
     root.append(err);
     if (!data) return;

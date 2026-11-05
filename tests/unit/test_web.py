@@ -6,11 +6,14 @@ import re
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from agent_bus import config, web
 from agent_bus.bus import Bus
+from agent_bus.remote import HubStore
 from agent_bus.store import Store
 from agent_bus.web import READ_SHOWN, WebServer, make_server
 
@@ -427,3 +430,119 @@ def test_requests_are_not_logged(
     captured = capsys.readouterr()
     assert "private words" not in captured.err + captured.out
     assert "/api/" not in captured.err + captured.out
+
+
+def test_inbox_backend_is_local_without_a_hub(client: Client) -> None:
+    assert client.get_json("/api/inbox")["backend"] == {"mode": "local", "hub": None}
+
+
+def test_inbox_backend_is_hub_with_the_url(serve: ServerFactory) -> None:
+    client = serve(hub="https://hub.example/x")
+    backend = client.get_json("/api/inbox")["backend"]
+    assert backend == {"mode": "hub", "hub": "https://hub.example/x"}
+
+
+def test_app_js_has_the_local_banner_and_no_innerhtml(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert (
+        '"LOCAL bus — not connected to a hub. Messages stay on this machine. "'
+        ' + "Set AGENT_BUS_HUB (or the plugin\'s hub_url) and restart."'
+    ) in " ".join(text.split())
+    assert "banner-local" in text
+    assert "innerHTML" not in text
+    _, _, css = client.request("GET", "/app.css")
+    assert b".banner-local" in css
+
+
+def test_app_js_has_the_answer_controls_and_no_kind_select(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    for label in ("Да", "Нет", "Ответить", "Отправить"):
+        assert f"'{label}'" in text
+    assert "el('select'" not in text
+    assert "<select" not in text
+    assert "innerHTML" not in text
+
+
+@pytest.mark.parametrize("answer", ["да", "нет"])
+def test_a_task_answered_with_yes_or_no_arrives_as_a_result(
+    client: Client, personal: Bus, answer: str
+) -> None:
+    task = personal.send("owner", "ok?", kind="task")
+    status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": answer})
+    assert status == 200
+    (got,) = personal.inbox()
+    assert (got.kind, got.body, got.reply_to) == ("result", answer, task.id)
+
+
+@pytest.mark.parametrize("original_kind", ["task", "text"])
+def test_a_remark_is_a_text_reply(client: Client, personal: Bus, original_kind: str) -> None:
+    msg = personal.send("owner", "hello", kind=original_kind)  # type: ignore[arg-type]
+    status, _ = client.post("/api/reply", {"msg_id": msg.id, "kind": "text", "body": "a remark"})
+    assert status == 200
+    (got,) = personal.inbox()
+    assert (got.kind, got.body, got.reply_to) == ("text", "a remark", msg.id)
+
+
+def test_result_to_a_text_is_a_400(client: Client, personal: Bus) -> None:
+    msg = personal.send("owner", "fyi", kind="text")
+    status, _ = client.post("/api/reply", {"msg_id": msg.id, "kind": "result", "body": "да"})
+    assert status == 400
+    assert personal.inbox() == []
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_result_and_await_human_have_no_reply_controls(
+    client: Client, personal: Bus, kind: str
+) -> None:
+    msg = personal.send("owner", "end", kind=kind)  # type: ignore[arg-type]
+    shown = by_id(client.get_json("/api/inbox")["messages"], msg.id)
+    assert shown["answerable"] is False
+    assert shown["reply_kinds"] == []
+
+
+class _FakeHubStore(HubStore):
+    def __init__(self) -> None:
+        pass
+
+
+class _FakeBus:
+    me = "owner"
+
+
+def _run_without_serving(
+    monkeypatch: pytest.MonkeyPatch, store: object, cfg: config.Config
+) -> None:
+    backend = SimpleNamespace(store=store, registry=None)
+    monkeypatch.setattr(web, "open_backend", lambda _cfg: backend)
+    monkeypatch.setattr(web, "Bus", lambda *a, **k: _FakeBus())
+    monkeypatch.setattr(WebServer, "serve_forever", lambda self, *a, **k: None)
+    assert web.run(cfg, port=0) == 0
+
+
+def test_run_start_line_in_local_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = config.load({}, bus_dir=str(tmp_path), agent="owner")
+    _run_without_serving(monkeypatch, Store(tmp_path / "bus"), cfg)
+    captured = capsys.readouterr()
+    assert re.fullmatch(
+        r"agent-bus web: http://127\.0\.0\.1:\d+/ as owner — "
+        r"LOCAL bus \(not connected to a hub; set AGENT_BUS_HUB\)\n",
+        captured.out,
+    )
+    assert captured.err.startswith("WARNING:")
+
+
+def test_run_start_line_in_hub_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = config.load({}, bus_dir=str(tmp_path), agent="owner", hub="https://hub.example/x")
+    _run_without_serving(monkeypatch, _FakeHubStore(), cfg)
+    captured = capsys.readouterr()
+    assert re.fullmatch(
+        r"agent-bus web: http://127\.0\.0\.1:\d+/ as owner — hub https://hub\.example/x\n",
+        captured.out,
+    )
+    assert "WARNING" not in captured.err
