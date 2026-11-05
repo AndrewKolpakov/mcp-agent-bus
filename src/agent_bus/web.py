@@ -790,18 +790,22 @@ APP_JS = """\
     const reply = el('div', { class: 'reply' });
     const box = answerBox(view);
     if (box) reply.append(box);
-    if (view.say.mode === 'new') reply.append(el('div', { class: 'meta' }, view.say.hint));
-    const area = el('textarea', {
-      placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area', rows: 3,
-    });
-    area.value = state.say;
-    area.addEventListener('input', () => { state.say = area.value; });
-    const send = el('button', {}, 'Отправить');
-    send.addEventListener('click', () => act(
-      '/api/say', { thread: view.thread, body: area.value }, () => { state.say = ''; },
-    ));
-    bindSend(area, send);
-    reply.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
+    // One control per state: while a task is open its answer control is the only input;
+    // the thread's own box returns once the task is answered.
+    if (!view.open_task) {
+      if (view.say.mode === 'new') reply.append(el('div', { class: 'meta' }, view.say.hint));
+      const area = el('textarea', {
+        placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area', rows: 3,
+      });
+      area.value = state.say;
+      area.addEventListener('input', () => { state.say = area.value; });
+      const send = el('button', {}, 'Отправить');
+      send.addEventListener('click', () => act(
+        '/api/say', { thread: view.thread, body: area.value }, () => { state.say = ''; },
+      ));
+      bindSend(area, send);
+      reply.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
+    }
     pane.append(reply);
     return pane;
   };

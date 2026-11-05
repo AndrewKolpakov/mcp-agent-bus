@@ -733,6 +733,18 @@ def test_app_js_reply_area_follows_msgs_inside_the_thread_pane(client: Client) -
     assert "innerHTML" not in detail
 
 
+def test_app_js_hides_the_thread_box_while_a_task_is_open(client: Client) -> None:
+    # One control per state: an open task is answered only through its own control; the
+    # thread's box (and its hint) is built only when no task is open.
+    _, _, js = client.request("GET", "/app.js")
+    detail = _js_function(js.decode(), "detail")
+    guard = detail.index("if (!view.open_task) {")
+    assert guard < detail.index("id: 'say-area'")
+    assert guard < detail.index("view.say.hint")
+    assert guard < detail.index("'/api/say'")
+    assert detail.index("answerBox(view)") < guard
+
+
 # --- messenger layout: /api/threads, /api/thread, /api/say ---------------------------------
 
 
