@@ -98,6 +98,139 @@ def test_text_replies_stay_allowed(alice: Bus, bob: Bus) -> None:
     assert alice.send("bob", "agreed", reply_to=answer.id).kind == "text"
 
 
+def test_a_thread_post_lands_in_the_thread_without_replying_or_acking(
+    alice: Bus, bob: Bus
+) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    acks_before = [e for e in alice.store.read_all().events if isinstance(e, AckEvent)]
+    follow_up = alice.send("bob", "one more thing", kind="task", thread=task.thread)
+    assert follow_up.thread == task.thread
+    assert follow_up.reply_to is None
+    assert follow_up.id != task.thread
+    acks_after = [e for e in alice.store.read_all().events if isinstance(e, AckEvent)]
+    assert acks_after == acks_before
+    # The result stays unacked: a thread post settles nothing.
+    assert result.id not in alice.state().acked
+    assert [m.id for m in alice.history(thread=task.thread)] == [task.id, result.id, follow_up.id]
+    assert [m.id for m in bob.inbox()] == [follow_up.id]
+
+
+def test_a_thread_post_works_in_both_directions_and_any_kind(store: Store) -> None:
+    alice = Bus(store, "alice", rate_limit=1000)
+    bob = Bus(store, "bob", rate_limit=1000)
+    root = alice.send("bob", "start", kind="task")
+    for sender, to in ((alice, "bob"), (bob, "alice")):
+        for kind in ("task", "text", "result", "await_human"):
+            posted = sender.send(to, f"{kind} from {sender.me}", kind=kind, thread=root.thread)  # type: ignore[arg-type]
+            assert (posted.thread, posted.reply_to, posted.kind) == (root.thread, None, kind)
+
+
+def test_a_thread_post_does_not_ack_a_message_addressed_to_the_sender(
+    alice: Bus, bob: Bus
+) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    bob.send("alice", "also this", kind="text", thread=task.thread)
+    # bob posted into the thread of a task addressed to him: it stays unacked.
+    assert task.id not in bob.state().acked
+    assert [m.id for m in bob.inbox()] == [task.id]
+    assert [e for e in bob.store.read_all().events if isinstance(e, AckEvent)] == []
+
+
+def test_a_result_follow_up_after_a_result_works_by_thread(alice: Bus, bob: Bus) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    first = bob.send("alice", "done", kind="result", reply_to=task.id)
+    second = bob.send("alice", "also done", kind="result", thread=task.thread)
+    assert second.kind == "result"
+    assert second.thread == first.thread == task.thread
+    assert second.reply_to is None
+
+
+def test_a_thread_post_into_a_result_rooted_thread_is_allowed(alice: Bus, bob: Bus) -> None:
+    result = alice.send("bob", "fyi, done", kind="result")
+    posted = bob.send("alice", "next", kind="task", thread=result.thread)
+    assert posted.thread == result.id
+
+
+def test_thread_and_reply_to_together_are_refused(alice: Bus, bob: Bus) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    count = len(alice.store.read_all().events)
+    with pytest.raises(BusError, match="pass reply_to or thread, not both"):
+        alice.send("bob", "x", kind="task", reply_to=task.id, thread=task.thread)
+    assert len(alice.store.read_all().events) == count
+
+
+def test_a_thread_post_into_an_unknown_thread_is_refused(alice: Bus) -> None:
+    with pytest.raises(BusError, match="unknown thread: NOPE"):
+        alice.send("bob", "x", thread="NOPE")
+
+
+def test_a_thread_post_must_name_the_threads_root_not_a_later_message(
+    alice: Bus, bob: Bus
+) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    assert result.thread == task.id
+    with pytest.raises(BusError, match=f"unknown thread: {result.id}"):
+        alice.send("bob", "x", thread=result.id)
+
+
+def test_a_third_agent_cannot_post_into_a_thread(store: Store, alice: Bus, bob: Bus) -> None:
+    carol = Bus(store, "carol", rate_limit=4)
+    task = alice.send("bob", "do it", kind="task")
+    count = len(store.read_all().events)
+    for to in ("alice", "bob"):
+        with pytest.raises(BusError, match=f"not a participant of thread {task.thread}"):
+            carol.send(to, "let me in", thread=task.thread)
+    assert len(store.read_all().events) == count
+
+
+def test_a_thread_posts_recipient_must_be_the_other_participant(
+    store: Store, alice: Bus, bob: Bus
+) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    with pytest.raises(BusError, match="must be the thread's other participant"):
+        alice.send("carol", "x", thread=task.thread)
+    with pytest.raises(BusError, match="must be the thread's other participant"):
+        bob.send("carol", "x", thread=task.thread)
+    with pytest.raises(BusError, match="yourself"):
+        alice.send("alice", "x", thread=task.thread)
+
+
+def test_a_thread_post_keeps_the_rate_limit_secret_and_body_checks(alice: Bus, bob: Bus) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    with pytest.raises(BusError, match="empty"):
+        alice.send("bob", "  ", thread=task.thread)
+    with pytest.raises(BusError, match="exceeds"):
+        alice.send("bob", "x" * (MAX_BODY_BYTES + 1), thread=task.thread)
+    with pytest.raises(BusError):
+        alice.send("bob", "key AKIAIOSFODNN7EXAMPLE", thread=task.thread)
+    for i in range(3):
+        alice.send("bob", f"a{i}", thread=task.thread)
+    with pytest.raises(RateLimitError, match="await_human"):
+        alice.send("bob", "over the limit", thread=task.thread)
+    handoff = alice.send("bob", "handoff", kind="await_human", thread=task.thread)
+    assert handoff.kind == "await_human"
+
+
+def test_replying_to_a_result_is_still_refused_by_the_loop_guard(alice: Bus, bob: Bus) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    with pytest.raises(BusError, match="ends its chain"):
+        alice.send("bob", "thanks", kind="text", reply_to=result.id)
+    # A thread post is the way on, and the loop guard is untouched afterwards.
+    alice.send("bob", "next", kind="task", thread=task.thread)
+    with pytest.raises(BusError, match="ends its chain"):
+        alice.send("bob", "thanks again", kind="text", reply_to=result.id)
+
+
+def test_reply_with_no_thread_argument_is_unchanged(alice: Bus, bob: Bus) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    assert (result.thread, result.reply_to) == (task.thread, task.id)
+    assert task.id in bob.state().acked
+
+
 def test_ack_is_idempotent_and_refuses_foreign_or_unknown(alice: Bus, bob: Bus) -> None:
     msg = alice.send("bob", "x")
     assert bob.ack(msg.id) is True

@@ -211,6 +211,26 @@ def participants(event: Event, original: MessageHeader | None = None) -> frozens
     return frozenset({event.agent})
 
 
+class BusError(ValueError):
+    """A request the bus refuses; the message is safe to show to the model."""
+
+
+def check_thread_post(root: MessageHeader | None, thread: str, sender: str, to: str) -> None:
+    """Refuse a post into `thread` that is not between the thread's two parties.
+
+    Threads are pairwise: the participants are the sender and recipient of
+    the thread's first message (`root`), and a post goes from one to the
+    other. A post that is not a reply is not checked by `check_reply`, so a
+    follow-up after a result needs no new thread.
+    """
+    if root is None or root.id != thread or root.thread != thread:
+        raise BusError(f"unknown thread: {thread}")
+    if sender not in (root.sender, root.to):
+        raise BusError(f"not a participant of thread {thread}")
+    if to not in (root.sender, root.to) or to == sender:
+        raise BusError("the recipient of a thread message must be the thread's other participant")
+
+
 def dump_event(event: Event) -> bytes:
     """One log line, newline included."""
     return event.model_dump_json(by_alias=True, exclude_none=True).encode() + b"\n"

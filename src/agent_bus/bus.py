@@ -22,8 +22,12 @@ from agent_bus.models import (
     MessageEvent,
     MessageHeader,
     check_agent_name,
+    check_thread_post,
     new_id,
     now,
+)
+from agent_bus.models import (
+    BusError as BusError,
 )
 from agent_bus.registry import Registry, SessionRegistry
 from agent_bus.state import BusState
@@ -33,10 +37,6 @@ from agent_bus.store import EventStore, Store, sha256_of
 MAX_BODY_BYTES = 64 * 1024
 DEFAULT_HISTORY = 20
 MAX_HISTORY = 200
-
-
-class BusError(ValueError):
-    """A request the bus refuses; the message is safe to show to the model."""
 
 
 _RELATIVE = re.compile(r"(\d+)\s*([smhdw])")
@@ -181,7 +181,10 @@ class Bus:
         kind: Kind = "text",
         reply_to: str | None = None,
         attachments: Sequence[str | Path] = (),
+        thread: str | None = None,
     ) -> MessageEvent:
+        if thread is not None and reply_to is not None:
+            raise BusError("pass reply_to or thread, not both")
         try:
             to = check_agent_name(to)
         except ValueError as exc:
@@ -202,9 +205,12 @@ class Bus:
             original = state.messages.get(reply_to)
             if original is None:
                 raise BusError(f"unknown message id for reply_to: {reply_to}")
-            thread = original.thread
+            msg_thread = original.thread
+        elif thread is not None:
+            check_thread_post(state.messages.get(thread), thread, self.me, to)
+            msg_thread = thread
         else:
-            thread = msg_id
+            msg_thread = msg_id
 
         if original is not None:
             check_reply(original, kind)
@@ -227,7 +233,7 @@ class Bus:
                 kind=kind,
                 body=body,
                 reply_to=reply_to,
-                thread=thread,
+                thread=msg_thread,
                 attachments=tuple(a for a, _ in files) or None,
             )
         )

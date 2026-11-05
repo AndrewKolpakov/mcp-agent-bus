@@ -135,7 +135,8 @@ it with another message; just ack it.
 
 A result or an await_human ends its chain: never answer it with another message. \
 Ack it, and if more work is needed, start it with a new kind="task". The bus refuses \
-replies to results that are not tasks.
+replies to results that are not tasks. After a result, if more work is needed, \
+send a new kind="task" with thread=<thread>, not reply_to.
 
 To send code or files for review, pass their paths in send's attachments instead of \
 pasting them into the body: the recipient gets exactly those bytes, checked by sha256. \
@@ -240,6 +241,12 @@ TOOLS = [
                 "reply_to": {
                     "type": "string",
                     "description": "msg_id of the message this answers; also acks it",
+                },
+                "thread": {
+                    "type": "string",
+                    "description": "Post into an existing thread without replying to a "
+                    "message (e.g. a follow-up after a result). You must be a participant; "
+                    "to must be the thread's other participant. Not with reply_to.",
                 },
                 "attachments": {
                     "type": "array",
@@ -552,6 +559,7 @@ class BusServer:
                 kind=arguments.get("kind", "text"),
                 reply_to=arguments.get("reply_to"),
                 attachments=arguments.get("attachments") or (),
+                thread=arguments.get("thread"),
             )
             result = {"msg_id": message.id, "thread": message.thread}
             if message.attachments:

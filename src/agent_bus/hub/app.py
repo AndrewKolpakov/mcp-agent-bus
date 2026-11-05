@@ -8,7 +8,11 @@ What `POST /events` accepts, by event type:
 
 | type         | the hub sets      | allowed when                                         |
 | ------------ | ----------------- | ---------------------------------------------------- |
-| `message`    | `from`, `thread`  | `to` shares a team with the caller; the body and     |
+| `message`    | `from`, `thread`  | (`thread` comes from `reply_to`, else from the body  |
+|              |                   | when it names an existing thread: 404 if unknown or  |
+|              |                   | the caller is no party of it, 422 if `to` is not its |
+|              |                   | other participant; else it is the message id)        |
+|              |                   | `to` shares a team with the caller; the body and     |
 |              |                   | attachments hold no secret (leaks.py), and each      |
 |              |                   | attachment is the caller's upload with that sha256;  |
 |              |                   | `reply_to`, if any, is a                             |
@@ -72,6 +76,7 @@ from agent_bus.models import (
     HumanTurnEvent,
     MessageEvent,
     check_agent_name,
+    check_thread_post,
     new_id,
     participants,
 )
@@ -215,6 +220,18 @@ class Hub:
             except BusError as exc:
                 raise HubError(422, str(exc)) from exc
             thread = original.thread
+        else:
+            wanted = _text(body, "thread", required=False)
+            if wanted is not None and wanted != msg_id:
+                root = self.table.message(wanted) if MESSAGE_ID.fullmatch(wanted) else None
+                try:
+                    check_thread_post(root, wanted, agent, to)
+                except BusError as exc:
+                    if str(exc).startswith(("unknown thread", "not a participant")):
+                        # Do not reveal a thread to a non-participant.
+                        raise HubError(404, f"unknown thread: {wanted}") from exc
+                    raise HubError(422, str(exc)) from exc
+                thread = wanted
 
         if kind != "await_human":
             since = self.now() - timedelta(seconds=self.rate_window)

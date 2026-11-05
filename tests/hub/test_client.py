@@ -107,6 +107,48 @@ def test_task_and_result_round_trip_through_the_hub(client: Client) -> None:
     assert task.id in alice.state().acked
 
 
+def test_a_thread_post_over_the_hub_keeps_the_thread_and_has_no_reply_to(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    task = alice.send("bob", "do it", kind="task")
+    bob_store.sync()
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    alice_store.sync()
+    follow_up = alice.send("bob", "next", kind="task", thread=task.thread)
+    assert follow_up.thread == task.thread
+    assert follow_up.id != task.thread
+    assert follow_up.reply_to is None
+    bob_store.sync()
+    assert [m.id for m in bob.history(thread=task.thread)] == [task.id, result.id, follow_up.id]
+    assert [m.id for m in bob.inbox()] == [follow_up.id]
+    # Nothing was acked by the thread post: the result is still unread by alice.
+    assert result.id not in alice.state().acked
+
+
+def test_the_hub_client_applies_the_same_thread_rules_as_the_local_bus(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    dave, dave_store, _ = client("dave")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    with pytest.raises(BusError, match="pass reply_to or thread, not both"):
+        alice.send("bob", "x", reply_to=task.id, thread=task.thread)
+    with pytest.raises(BusError, match="unknown thread: NOPE"):
+        alice.send("bob", "x", thread="NOPE")
+    with pytest.raises(BusError, match="must be the thread's other participant"):
+        alice.send("dave", "x", thread=task.thread)
+    # dave is on alice's team but not a party of the thread.
+    dave_store.sync()
+    with pytest.raises(BusError, match="unknown thread"):
+        dave.send("bob", "x", thread=task.thread)
+    # replying to a result is still refused through the hub.
+    bob_store.sync()
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    alice_store.sync()
+    with pytest.raises(BusError, match="ends its chain"):
+        alice.send("bob", "thanks", reply_to=result.id)
+
+
 def test_peers_are_teammates_and_count_only_my_unacked(client: Client) -> None:
     alice, alice_store, _ = client("alice")
     dave, _, _ = client("dave")

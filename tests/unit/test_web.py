@@ -1152,6 +1152,84 @@ def test_open_task_is_the_newest_unanswered_task_to_me(
     assert view["answered_task"] is None
 
 
+def test_a_new_task_in_an_answered_thread_flips_it_back_to_waiting(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    task1 = personal.send("owner", "first", kind="task")
+    owner.send("personal", "да", kind="result", reply_to=task1.id)
+    open_thread(client, task1.thread)
+    assert thread_row(client, task1.thread)["status"] == "answered"
+
+    task2 = personal.send("owner", "a follow-up", kind="task", thread=task1.thread)
+    assert task2.reply_to is None
+    assert thread_row(client, task1.thread)["status"] == "waiting"
+    view = open_thread(client, task1.thread)
+    assert view["open_task"] == {"id": task2.id}
+    assert view["answered_task"] is None
+    assert [m["id"] for m in view["messages"]][-1] == task2.id
+
+
+def test_thread_status_is_waiting_for_a_latest_task_after_an_answered_one(
+    owner: Bus, personal: Bus
+) -> None:
+    task1 = personal.send("owner", "first", kind="task")
+    result = owner.send("personal", "да", kind="result", reply_to=task1.id)
+    task2 = personal.send("owner", "second", kind="task", thread=task1.thread)
+    messages = owner.history(thread=task1.thread, last=None)
+    assert [m.id for m in messages] == [task1.id, result.id, task2.id]
+    acked = {task1.id, result.id, task2.id}
+    assert web.thread_status(messages, "owner", acked) == "waiting"
+    assert web.thread_status(messages[:2], "owner", {task1.id}) == "answered"
+
+
+def test_a_new_task_after_a_discussed_one_is_waiting(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    task1 = personal.send("owner", "first", kind="task")
+    owner.send("personal", "question", kind="text", reply_to=task1.id)
+    assert thread_row(client, task1.thread)["status"] == "discussed"
+    personal.send("owner", "second", kind="task", thread=task1.thread)
+    assert thread_row(client, task1.thread)["status"] == "waiting"
+
+
+def test_the_owners_answer_goes_to_the_latest_open_task_of_the_thread(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    task1 = personal.send("owner", "first", kind="task")
+    owner.send("personal", "да", kind="result", reply_to=task1.id)
+    task2 = personal.send("owner", "second", kind="task", thread=task1.thread)
+    view = open_thread(client, task1.thread)
+    assert view["open_task"] == {"id": task2.id}
+
+    status, _ = client.post(
+        "/api/reply", {"msg_id": view["open_task"]["id"], "kind": "result", "body": "нет"}
+    )
+    assert status == 200
+    answer = [m for m in owner.history(thread=task1.thread, last=None) if m.sender == "owner"][-1]
+    assert (answer.reply_to, answer.kind, answer.body, answer.thread) == (
+        task2.id,
+        "result",
+        "нет",
+        task1.thread,
+    )
+    view = open_thread(client, task1.thread)
+    assert view["open_task"] is None
+    assert view["answered_task"] == {"id": task2.id, "answer": "нет"}
+    assert thread_row(client, task1.thread)["status"] == "answered"
+
+
+def test_free_text_in_a_thread_still_replies_to_the_latest_incoming(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    task1 = personal.send("owner", "first", kind="task")
+    owner.send("personal", "да", kind="result", reply_to=task1.id)
+    task2 = personal.send("owner", "second", kind="task", thread=task1.thread)
+    status, _ = client.post("/api/say", {"thread": task1.thread, "body": "a question"})
+    assert status == 200
+    said = owner.history(thread=task1.thread, last=None)[-1]
+    assert (said.sender, said.kind, said.reply_to) == ("owner", "text", task2.id)
+
+
 def test_open_task_is_null_without_a_task(client: Client, personal: Bus) -> None:
     text = personal.send("owner", "just talk")
     view = open_thread(client, text.thread)

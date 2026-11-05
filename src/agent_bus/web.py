@@ -69,6 +69,8 @@ def _my_remarks(messages: list[MessageEvent], me: str) -> set[str]:
 def thread_status(messages: list[MessageEvent], me: str, acked: set[str]) -> str:
     """Open task: waiting if one is untouched, discussed if each has a text reply of mine.
 
+    A task that is open stays so whatever earlier tasks of the thread were answered, so a
+    new task in a closed thread flips it back to waiting.
     Without an open task: new while a message to me is unacked, else answered.
     """
     answered = _my_results(messages, me)

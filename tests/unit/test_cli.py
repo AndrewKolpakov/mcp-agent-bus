@@ -67,6 +67,82 @@ def test_send_reads_body_from_stdin(
     assert json.loads(capsys.readouterr().out)["body"] == "from stdin\nline two"
 
 
+def test_send_thread_posts_into_a_thread_after_a_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(tmp_path, "--as", "alice", "send", "--to", "bob", "--kind", "task", "do it") == 0
+    task_id = capsys.readouterr().out.strip()
+    assert (
+        _run(
+            tmp_path,
+            "--as",
+            "bob",
+            "send",
+            "--to",
+            "alice",
+            "--kind",
+            "result",
+            "--reply-to",
+            task_id,
+            "done",
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        _run(
+            tmp_path,
+            "--as",
+            "alice",
+            "send",
+            "--to",
+            "bob",
+            "--kind",
+            "task",
+            "--thread",
+            task_id,
+            "next",
+        )
+        == 0
+    )
+    new_id = capsys.readouterr().out.strip()
+    assert _run(tmp_path, "--as", "alice", "history", "--thread", task_id, "--json") == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert [r["id"] for r in rows][-1] == new_id
+    assert rows[-1]["thread"] == task_id
+    assert "reply_to" not in rows[-1]
+
+
+def test_send_thread_and_reply_to_together_fail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(tmp_path, "--as", "alice", "send", "--to", "bob", "hi") == 0
+    first = capsys.readouterr().out.strip()
+    code = _run(
+        tmp_path,
+        "--as",
+        "alice",
+        "send",
+        "--to",
+        "bob",
+        "--reply-to",
+        first,
+        "--thread",
+        first,
+        "x",
+    )
+    assert code == 1
+    assert "pass reply_to or thread, not both" in capsys.readouterr().err
+
+
+def test_send_thread_unknown_thread_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(tmp_path, "--as", "alice", "send", "--to", "bob", "--thread", "NOPE", "x") == 1
+    assert "unknown thread: NOPE" in capsys.readouterr().err
+
+
 def test_peers_and_tail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _run(tmp_path, "--as", "alice", "send", "--to", "bob", "hi")
     capsys.readouterr()

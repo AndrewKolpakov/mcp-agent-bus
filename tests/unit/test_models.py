@@ -7,6 +7,7 @@ from collections.abc import Callable
 import pytest
 from pydantic import ValidationError
 
+from agent_bus.bus import BusError
 from agent_bus.models import (
     EVENT_ADAPTER,
     AckEvent,
@@ -15,6 +16,7 @@ from agent_bus.models import (
     MessageEvent,
     check_agent_name,
     check_team_name,
+    check_thread_post,
     dump_event,
     new_id,
     participants,
@@ -101,6 +103,60 @@ def test_participants_of_a_settlement_are_those_of_its_message(
 
 def test_human_turn_belongs_to_its_agent_alone() -> None:
     assert participants(HumanTurnEvent(agent="bob", session="S")) == {"bob"}
+
+
+def _root() -> MessageEvent:
+    return MessageEvent(id="R", sender="alice", to="bob", kind="result", body="r", thread="R")
+
+
+_OTHER_PARTICIPANT = "recipient of a thread message must be the thread's other participant"
+
+
+@pytest.mark.parametrize(
+    ("root", "thread", "sender", "to", "match"),
+    [
+        (None, "R", "alice", "bob", "unknown thread: R"),
+        (_root(), "OTHER", "alice", "bob", "unknown thread: OTHER"),
+        (
+            MessageEvent(id="R", sender="alice", to="bob", body="r", thread="NOT-R"),
+            "R",
+            "alice",
+            "bob",
+            "unknown thread: R",
+        ),
+        (_root(), "R", "carol", "bob", "not a participant of thread R"),
+        (_root(), "R", "carol", "alice", "not a participant of thread R"),
+        (_root(), "R", "alice", "carol", _OTHER_PARTICIPANT),
+        (_root(), "R", "alice", "alice", _OTHER_PARTICIPANT),
+        (_root(), "R", "bob", "bob", _OTHER_PARTICIPANT),
+        (_root(), "R", "bob", "carol", _OTHER_PARTICIPANT),
+    ],
+)
+def test_check_thread_post_refuses(
+    root: MessageEvent | None, thread: str, sender: str, to: str, match: str
+) -> None:
+    with pytest.raises(BusError, match=match):
+        check_thread_post(root, thread, sender, to)
+
+
+def test_check_thread_post_prefixes_are_exact() -> None:
+    with pytest.raises(BusError) as unknown:
+        check_thread_post(None, "T", "alice", "bob")
+    assert str(unknown.value).startswith("unknown thread: T")
+    with pytest.raises(BusError) as stranger:
+        check_thread_post(_root(), "R", "carol", "bob")
+    assert str(stranger.value).startswith("not a participant of thread R")
+    with pytest.raises(BusError) as wrong:
+        check_thread_post(_root(), "R", "alice", "carol")
+    assert str(wrong.value).startswith(
+        "the recipient of a thread message must be the thread's other participant"
+    )
+
+
+def test_check_thread_post_accepts_both_directions_whatever_the_root_kind() -> None:
+    root = _root()
+    check_thread_post(root, "R", "alice", "bob")
+    check_thread_post(root, "R", "bob", "alice")
 
 
 def test_team_names_follow_the_agent_name_rule() -> None:
