@@ -490,6 +490,71 @@ def test_app_js_labels_the_new_message_area_with_the_peer_name(client: Client) -
     assert "Написать personal" not in text
 
 
+def _js_function(text: str, name: str) -> str:
+    """Body of `const <name> = ...;` up to the next top-level const."""
+    start = text.index(f"const {name} = ")
+    end = text.index("\n  const ", start + 1)
+    return text[start:end]
+
+
+def test_app_js_poll_refreshes_the_open_thread_only(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    poll = _js_function(text, "poll")
+    assert "setInterval(poll, 10000)" in text
+    assert "setInterval(load" not in text
+    # the thread call is guarded by the selected thread and never opens one
+    assert "const thread = state.selected;" in poll
+    assert "if (!thread || state.selected !== thread) return;" in poll
+    assert poll.count("'/api/thread'") == 1
+    assert poll.index("await load()") < poll.index("'/api/thread'")
+    assert "openThread" not in poll
+    assert "state.selected =" not in poll
+    # a failed thread call shows the error and keeps the old view
+    assert "state.error = String(e.message" in poll
+    catch = poll[poll.index("catch (e)") :]
+    assert "state.view =" not in catch
+    # the radio choice is dropped only when the task is no longer open
+    assert "if (!view.open_task) state.choice = '';" in poll
+
+
+def test_app_js_render_keeps_scroll_drafts_and_focus_across_a_refresh(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    render = _js_function(text, "render")
+    assert "scrollTop" in render
+    assert "scrollHeight - msgs.scrollTop - msgs.clientHeight" in render
+    assert "nearBottom" in render
+    assert "window.scrollTo(0, pageTop)" in render
+    assert "selectionStart" in render
+    assert "selectionEnd" in render
+    assert "setSelectionRange(focus.start, focus.end)" in render
+    assert "area.focus(" in render
+    # the drafts are state, re-applied on every rebuild
+    assert "area.value = state.say;" in text
+    assert "area.value = state.newBody;" in text
+    assert "radio.checked = state.choice === value;" in text
+    # nothing skips a refresh because a textarea has focus any more
+    assert "typing" not in text
+
+
+def test_a_message_after_the_thread_was_opened_is_acked_by_the_next_thread_call(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "first")
+    open_thread(client, first.thread)
+    later = personal.send("owner", "later", reply_to=first.id)
+
+    # the poll's list call acks nothing and shows the new message as unread
+    assert thread_row(client, first.thread)["unread"] == 1
+    assert [m.id for m in owner.inbox()] == [later.id]
+
+    view = open_thread(client, first.thread)
+    assert [m["body"] for m in view["messages"]] == ["first", "later"]
+    assert owner.inbox() == []
+    assert thread_row(client, first.thread)["unread"] == 0
+
+
 def test_app_css_stacks_the_panes_on_narrow_screens(client: Client) -> None:
     _, _, css = client.request("GET", "/app.css")
     assert b"@media" in css

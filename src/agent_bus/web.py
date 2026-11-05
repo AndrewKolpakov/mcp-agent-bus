@@ -487,7 +487,8 @@ h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
 .badge.new { background: #cfe0ff; }
 .unread-count { font-size: .75rem; font-weight: 700; color: #fff; background: #2563eb;
   border-radius: 9px; padding: 0 .4rem; margin-left: .3rem; }
-.msgs { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .7rem; }
+.msgs { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .7rem;
+  max-height: 60vh; overflow-y: auto; }
 .msg { max-width: 80%; background: #fff; border: 1px solid #d8d8d4; border-radius: 8px;
   padding: .4rem .6rem; align-self: flex-start; }
 .msg.mine { align-self: flex-end; background: #dbe8ff; border-color: #b6c8e8; }
@@ -577,9 +578,24 @@ APP_JS = """\
     render();
   };
 
-  const typing = () => {
-    const active = document.activeElement;
-    return active && active.tagName === 'TEXTAREA';
+  // One tick: list, then (only when a thread is open) that thread's view, which acks
+  // its new messages because they are on screen; the list is read again so the open
+  // thread's badge shows the ack. A failed thread call keeps the old view.
+  const poll = async () => {
+    const thread = state.selected;
+    await load();
+    if (!thread || state.selected !== thread) return;
+    try {
+      const view = await call('/api/thread', { thread: thread });
+      if (state.selected !== thread) return;
+      state.view = view;
+      if (!view.open_task) state.choice = '';
+    } catch (e) {
+      state.error = String(e.message || e);
+      render();
+      return;
+    }
+    await load();
   };
 
   const threadRow = (t) => {
@@ -640,13 +656,15 @@ APP_JS = """\
       return pane;
     }
     pane.append(el('div', { class: 'meta' }, 'Ветка: ' + view.counterpart));
-    const list = el('div', { class: 'msgs' });
+    const list = el('div', { class: 'msgs', id: 'msgs' });
     for (const m of view.messages) list.append(message(m));
     pane.append(list);
     const box = answerBox(view);
     if (box) pane.append(box);
     if (view.say.mode === 'new') pane.append(el('div', { class: 'meta' }, view.say.hint));
-    const area = el('textarea', { placeholder: 'Сообщение для ' + view.counterpart });
+    const area = el('textarea', {
+      placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area',
+    });
     area.value = state.say;
     area.addEventListener('input', () => { state.say = area.value; });
     const send = el('button', {}, 'Отправить');
@@ -658,12 +676,34 @@ APP_JS = """\
   };
 
   const render = () => {
-    if (state.data && typing()) {
-      // Do not rebuild under the owner's cursor; only the error line is refreshed.
-      const line = document.getElementById('error');
-      if (line) line.textContent = state.error;
-      return;
+    // The drafts and the radio choice live in state, so a rebuild loses only the DOM
+    // position: capture the scroll offsets and the caret first, put them back after.
+    const msgs = document.getElementById('msgs');
+    const pageTop = window.scrollY;
+    const paneTop = msgs ? msgs.scrollTop : 0;
+    const nearBottom = !msgs || (msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 24);
+    const sameThread = state.shownThread === state.selected;
+    const active = document.activeElement;
+    const focus = active && active.tagName === 'TEXTAREA' && active.id
+      ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
+      : null;
+    draw();
+    state.shownThread = state.selected;
+    const fresh = document.getElementById('msgs');
+    if (fresh) {
+      fresh.scrollTop = (nearBottom || !sameThread) ? fresh.scrollHeight : paneTop;
     }
+    window.scrollTo(0, pageTop);
+    if (focus) {
+      const area = document.getElementById(focus.id);
+      if (area) {
+        area.focus({ preventScroll: true });
+        area.setSelectionRange(focus.start, focus.end);
+      }
+    }
+  };
+
+  const draw = () => {
     const data = state.data;
     root.replaceChildren();
     root.append(el('h1', {}, data ? 'agent-bus: ' + data.me : 'agent-bus'));
@@ -680,7 +720,9 @@ APP_JS = """\
     root.append(err);
     if (!data) return;
 
-    const area = el('textarea', { placeholder: 'Новое сообщение для ' + data.peer });
+    const area = el('textarea', {
+      placeholder: 'Новое сообщение для ' + data.peer, id: 'new-area',
+    });
     area.value = state.newBody;
     area.addEventListener('input', () => { state.newBody = area.value; });
     const send = el('button', {}, 'Отправить');
@@ -699,6 +741,6 @@ APP_JS = """\
   };
 
   load();
-  setInterval(load, 10000);
+  setInterval(poll, 10000);
 })();
 """
