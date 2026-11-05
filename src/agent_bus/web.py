@@ -467,6 +467,7 @@ PAGE = """<!doctype html>
 """
 
 APP_CSS = """\
+html, body { height: 100%; overflow: hidden; }
 body { font: 15px/1.4 system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1b1b1b; }
 main { display: flex; flex-direction: column; height: 100vh; box-sizing: border-box;
   padding: .6rem .8rem; }
@@ -509,13 +510,12 @@ h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
 .msg.mine .bubble { background: #dbe8ff; border-color: #b6c8e8; }
 .msg .meta { font-size: .75rem; margin: .1rem .3rem 0; }
 .msg .kind { color: #777; font-size: .75rem; }
+/* The page never scrolls at any width: below 800px the list stacks over the thread, both
+   still scroll inside their own boxes, and the reply area stays pinned under the history. */
 @media (max-width: 800px) {
-  body { overflow: auto; }
-  main { height: auto; }
-  .panes { flex-direction: column; flex: none; }
-  .list { flex: 0 0 auto; max-height: 40vh; }
-  .detail { flex: none; min-height: 60vh; }
-  .msgs { max-height: 50vh; }
+  .panes { flex-direction: column; }
+  .list { flex: 0 0 auto; max-height: 30vh; }
+  .detail { flex: 1 1 0; min-height: 0; }
   .msg { max-width: 90%; }
 }
 textarea { width: 100%; min-height: 3.5rem; font: inherit; box-sizing: border-box; }

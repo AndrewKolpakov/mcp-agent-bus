@@ -597,10 +597,14 @@ def test_app_css_two_pane_layout_fills_the_window(client: Client) -> None:
     msgs = _css_rule(css, ".msgs")
     assert "overflow-y: auto" in msgs
     assert "flex: 1 1 auto" in msgs
-    # below 800px the panes stack and the list scrolls within 40vh
+    # below 800px the panes stack and the list scrolls within 30vh
     narrow = css[css.index("@media (max-width: 800px)") :]
     assert "flex-direction: column" in narrow
-    assert "max-height: 40vh" in narrow
+    assert "max-height: 30vh" in narrow
+    # the page itself never scrolls, at any width: only the panes do
+    assert "html, body { height: 100%; overflow: hidden; }" in css
+    assert "overflow: auto" not in narrow
+    assert "height: auto" not in narrow
 
 
 def test_app_js_reply_area_follows_msgs_inside_the_thread_pane(client: Client) -> None:
