@@ -114,6 +114,22 @@ CLAUDE_CONFIG_DIR=<каталог аккаунта> scripts/run.sh claude -- --m
 | `agent-bus codex` | Запускает сессию Codex на шине |
 | `agent-bus admin …` | Управляет агентами, токенами и командами хаба |
 
+## agent-bus web
+
+A local web page for a human who acts as a bus agent, with no AI involved:
+`agent-bus --as owner web` (`--port` defaults to 8765; `--bus-dir` and `--hub`
+apply as for every command). It prints `http://127.0.0.1:<port>/`; open it in a
+browser. The server listens on 127.0.0.1 only.
+
+- The page shows the messages addressed to you, unread first, and polls every 5 seconds
+  (on a hub it syncs first).
+- Each message that can be answered has a text box and a kind choice; a message of
+  kind `result` or `await_human` can only be acked.
+- A "New message to personal" box sends a new text message.
+- Nothing is acked on its own: a message is acked only by answering it or by the
+  "Ack shown" button.
+- Sending goes through the same checks as the CLI: secret scan, reply rules, rate limit.
+
 ## Разработка
 
 ```bash
