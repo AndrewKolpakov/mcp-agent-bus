@@ -255,6 +255,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return messages
 
     def _thread(self, data: dict[str, Any]) -> None:
+        self._sync()
         bus = self.server.bus
         me = bus.me
         messages = self._thread_messages(data)
@@ -299,6 +300,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         )
 
     def _say(self, data: dict[str, Any]) -> None:
+        self._sync()
         bus = self.server.bus
         body = self._text(data, "body")
         messages = self._thread_messages(data)
@@ -357,6 +359,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         msg_id = self._text(data, "msg_id")
         kind = self._text(data, "kind")
         body = self._text(data, "body")
+        # On a hub an append never reaches the mirror, so the answered check needs a pull.
+        self._sync()
         bus = self.server.bus
         original = bus.state().messages.get(msg_id)
         if original is None or original.to != bus.me:

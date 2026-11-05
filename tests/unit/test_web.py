@@ -938,6 +938,67 @@ def test_a_second_result_to_the_same_task_is_a_409_and_stores_nothing(
     assert len(personal.inbox()) == 1
 
 
+class _FakeHubApi:
+    """A hub that assigns a seq and, like the real one, never touches any mirror on append."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def post_event(self, record: dict[str, Any]) -> dict[str, Any]:
+        stored = {**record, "seq": len(self.records) + 1}
+        self.records.append(stored)
+        return stored
+
+    def events(self, after: int, limit: int = 100) -> list[bytes]:
+        return [json.dumps(r).encode() for r in self.records if r["seq"] > after][:limit]
+
+
+class _NoRegistry:
+    def teammates(self, agent: str) -> None:
+        return None
+
+    def report_activity(self, agent: str, report: object) -> None:
+        return None
+
+
+def _hub_bus(api: _FakeHubApi, home: Path, name: str) -> tuple[Bus, HubStore]:
+    store = HubStore(api, home)  # type: ignore[arg-type]
+    return Bus(store, name, registry=_NoRegistry(), rate_limit=1000), store  # type: ignore[arg-type]
+
+
+def test_on_a_hub_a_second_answer_is_a_409_before_any_poll_syncs(tmp_path: Path) -> None:
+    api = _FakeHubApi()
+    me, me_store = _hub_bus(api, tmp_path / "me", "owner")
+    other, _ = _hub_bus(api, tmp_path / "other", "personal")
+    task = other.send("owner", "ok?", kind="task")
+    server = make_server(me, port=0, sync=me_store.sync)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        c = Client(server)
+        assert [t["status"] for t in c.get_json("/api/threads")["threads"]] == ["waiting"]
+        first = {"msg_id": task.id, "kind": "result", "body": "да"}
+        assert c.post("/api/reply", first)[0] == 200
+        # No poll in between: the mirror does not hold the first answer until a sync.
+        second = {"msg_id": task.id, "kind": "result", "body": "нет"}
+        status, data = c.post("/api/reply", second)
+        assert (status, data) == (409, {"error": "already answered"})
+        results = [r["body"] for r in api.records if r.get("kind") == "result"]
+        assert results == ["да"]
+        # The view right after answering shows the answer, not the radios again.
+        view = c.post("/api/thread", {"thread": task.thread})[1]
+        assert view["open_task"] is None
+        assert view["answered_task"] == {"id": task.id, "answer": "да"}
+        # Reopening acks once: the repeated opens add no second AckEvent.
+        c.post("/api/thread", {"thread": task.thread})
+        acks = [r for r in api.records if r["type"] == "ack" and r["id"] == task.id]
+        assert len(acks) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_a_text_reply_after_a_result_is_still_allowed(client: Client, personal: Bus) -> None:
     task = personal.send("owner", "ok?", kind="task")
     status, _ = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
