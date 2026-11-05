@@ -121,7 +121,9 @@ def test_a_thread_post_over_the_hub_keeps_the_thread_and_has_no_reply_to(client:
     bob_store.sync()
     assert [m.id for m in bob.history(thread=task.thread)] == [task.id, result.id, follow_up.id]
     assert [m.id for m in bob.inbox()] == [follow_up.id]
-    # Nothing was acked by the thread post: the result is still unread by alice.
+    # Nothing was acked by the thread post: the result is still unread by alice. Her mirror
+    # is synced first, so an ack written on the hub side would be seen here.
+    alice_store.sync()
     assert result.id not in alice.state().acked
 
 
