@@ -630,6 +630,18 @@ APP_JS = """\
     return node;
   };
 
+  // A message time in the viewer's local zone: HH:MM today, DD.MM HH:MM earlier this
+  // year, DD.MM.YYYY HH:MM before that; an unparsable time is shown as sent.
+  const shortTime = (iso, now = new Date()) => {
+    const t = new Date(iso);
+    if (isNaN(t.getTime())) return String(iso);
+    const two = (n) => String(n).padStart(2, '0');
+    const hm = two(t.getHours()) + ':' + two(t.getMinutes());
+    if (t.toDateString() === now.toDateString()) return hm;
+    const dm = two(t.getDate()) + '.' + two(t.getMonth() + 1);
+    return (t.getFullYear() === now.getFullYear() ? dm : dm + '.' + t.getFullYear()) + ' ' + hm;
+  };
+
   const message = (m) => {
     const node = el('div', { class: 'msg' + (m.mine ? ' mine' : '') });
     const bubble = el('div', { class: 'bubble' }, el('div', { class: 'body' }, m.body));
@@ -637,8 +649,10 @@ APP_JS = """\
       bubble.append(el('div', { class: 'meta' }, 'attachments: ' + m.attachments.join(', ')));
     }
     node.append(bubble);
-    node.append(el('div', { class: 'meta' }, m.from + ' · ' + m.time + ' · ',
-      el('span', { class: 'kind' }, m.kind)));
+    // The kind is shown only when it is not plain text.
+    const meta = el('div', { class: 'meta' }, m.from + ' · ' + shortTime(m.time));
+    if (m.kind !== 'text') meta.append(' · ', el('span', { class: 'kind' }, m.kind));
+    node.append(meta);
     return node;
   };
 

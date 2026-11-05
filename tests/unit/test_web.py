@@ -607,6 +607,24 @@ def test_app_css_two_pane_layout_fills_the_window(client: Client) -> None:
     assert "height: auto" not in narrow
 
 
+def test_app_js_shows_a_short_local_time_and_the_kind_only_when_not_text(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    short = _js_function(text, "shortTime")
+    # local clock fields, never the raw ISO string
+    assert "getHours()" in short
+    assert "getMinutes()" in short
+    assert "toISOString" not in short
+    assert "getUTC" not in short
+    # the date appears only off today, the year only off this year
+    assert "t.toDateString() === now.toDateString()" in short
+    assert "t.getFullYear() === now.getFullYear()" in short
+    message = _js_function(text, "message")
+    assert "shortTime(m.time)" in message
+    assert "' · ' + m.time" not in message
+    assert "if (m.kind !== 'text')" in message
+
+
 def test_app_js_reply_area_follows_msgs_inside_the_thread_pane(client: Client) -> None:
     _, _, js = client.request("GET", "/app.js")
     detail = _js_function(js.decode(), "detail")
