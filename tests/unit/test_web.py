@@ -568,7 +568,49 @@ def test_a_message_after_the_thread_was_opened_is_acked_by_the_next_thread_call(
 
 def test_app_css_stacks_the_panes_on_narrow_screens(client: Client) -> None:
     _, _, css = client.request("GET", "/app.css")
-    assert b"@media" in css
+    assert b"@media (max-width: 800px)" in css
+
+
+def _css_rule(css: str, selector: str) -> str:
+    match = re.search(r"(?m)^" + re.escape(selector) + r" \{([^}]*)\}", css)
+    assert match, selector
+    return " ".join(match.group(1).split())
+
+
+def test_app_css_two_pane_layout_fills_the_window(client: Client) -> None:
+    _, _, raw = client.request("GET", "/app.css")
+    css = raw.decode()
+    # the list never grows with its content: fixed basis and a zero min-width
+    lst = _css_rule(css, ".list")
+    assert "flex: 0 0 340px" in lst
+    assert "min-width: 0" in lst
+    assert "overflow-y: auto" in lst
+    detail = _css_rule(css, ".detail")
+    assert "flex: 1 1 0" in detail
+    assert "min-width: 0" in detail
+    assert "max-width: 70rem" not in css
+    # a row title is one line with an ellipsis
+    title = _css_rule(css, ".thread .title")
+    for part in ("white-space: nowrap", "overflow: hidden", "text-overflow: ellipsis"):
+        assert part in title
+    # #msgs is the scroller between the header and the reply area
+    msgs = _css_rule(css, ".msgs")
+    assert "overflow-y: auto" in msgs
+    assert "flex: 1 1 auto" in msgs
+    # below 800px the panes stack and the list scrolls within 40vh
+    narrow = css[css.index("@media (max-width: 800px)") :]
+    assert "flex-direction: column" in narrow
+    assert "max-height: 40vh" in narrow
+
+
+def test_app_js_reply_area_follows_msgs_inside_the_thread_pane(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    detail = _js_function(js.decode(), "detail")
+    assert detail.index("id: 'msgs'") < detail.index("class: 'reply'")
+    assert detail.index("pane.append(list)") < detail.index("pane.append(reply)")
+    assert "pane.append(reply)" in detail
+    assert "reply.append(el('div', { class: 'row' }, area)" in detail
+    assert "innerHTML" not in detail
 
 
 # --- messenger layout: /api/threads, /api/thread, /api/say ---------------------------------

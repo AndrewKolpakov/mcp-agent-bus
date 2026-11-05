@@ -468,35 +468,55 @@ PAGE = """<!doctype html>
 
 APP_CSS = """\
 body { font: 15px/1.4 system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1b1b1b; }
-main { max-width: 70rem; margin: 0 auto; padding: 1rem; }
+main { display: flex; flex-direction: column; height: 100vh; box-sizing: border-box;
+  padding: .6rem .8rem; }
 h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
 .card { background: #fff; border: 1px solid #d8d8d4; border-radius: 6px; padding: .6rem .8rem;
   margin-bottom: .7rem; }
 .meta { color: #555; font-size: .85rem; margin-bottom: .3rem; }
 .body { white-space: pre-wrap; word-break: break-word; }
 .row { display: flex; gap: .5rem; margin-top: .5rem; align-items: flex-start; }
-.panes { display: flex; gap: .8rem; align-items: flex-start; }
-.list { flex: 0 0 22rem; max-width: 100%; }
-.detail { flex: 1 1 auto; min-width: 0; }
-.thread { background: #fff; border: 1px solid #d8d8d4; border-radius: 6px; padding: .5rem .7rem;
-  margin-bottom: .4rem; cursor: pointer; }
-.thread.selected { border-color: #2563eb; background: #eef3ff; }
-.thread .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panes { display: flex; gap: .8rem; align-items: stretch; flex: 1 1 auto; min-height: 0; }
+.list { flex: 0 0 340px; min-width: 0; overflow-y: auto; }
+.detail { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  background: #fff; border: 1px solid #d8d8d4; border-radius: 6px; }
+.detail-head { flex: 0 0 auto; padding: .5rem .8rem; min-width: 0;
+  border-bottom: 1px solid #d8d8d4; }
+.detail-title { font-size: 1.05rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0; }
+.detail-empty { flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+  color: #777; }
+.reply { flex: 0 0 auto; border-top: 1px solid #d8d8d4; padding: .5rem .8rem; background: #fafaf8; }
+.reply .row { margin-top: .4rem; }
+.thread { border-bottom: 1px solid #e3e3df; padding: .4rem .6rem; cursor: pointer; min-width: 0; }
+.thread:hover { background: #ececE8; }
+.list .card { position: sticky; bottom: 0; margin: 0; border-radius: 0; }
+.thread.selected { background: #dbe8ff; }
+.thread .title { font-weight: 400; font-size: 15px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0; }
+.thread .meta { margin: 0; }
 .badge { font-size: .75rem; border-radius: 9px; padding: 0 .5rem; background: #e5e5e0; }
 .badge.waiting { background: #fde7c3; }
 .badge.new { background: #cfe0ff; }
 .unread-count { font-size: .75rem; font-weight: 700; color: #fff; background: #2563eb;
   border-radius: 9px; padding: 0 .4rem; margin-left: .3rem; }
-.msgs { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .7rem;
-  max-height: 60vh; overflow-y: auto; }
-.msg { max-width: 80%; background: #fff; border: 1px solid #d8d8d4; border-radius: 8px;
-  padding: .4rem .6rem; align-self: flex-start; }
-.msg.mine { align-self: flex-end; background: #dbe8ff; border-color: #b6c8e8; }
+.msgs { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+  gap: .6rem; padding: .6rem .8rem; }
+.msg { max-width: 70%; align-self: flex-start; min-width: 0; }
+.msg.mine { align-self: flex-end; }
+.msg .bubble { background: #f0f0ec; border: 1px solid #d8d8d4; border-radius: 10px;
+  padding: .4rem .6rem; }
+.msg.mine .bubble { background: #dbe8ff; border-color: #b6c8e8; }
+.msg .meta { font-size: .75rem; margin: .1rem .3rem 0; }
 .msg .kind { color: #777; font-size: .75rem; }
-@media (max-width: 700px) {
-  .panes { flex-direction: column; align-items: stretch; }
-  .list { flex-basis: auto; }
-  .msg { max-width: 100%; }
+@media (max-width: 800px) {
+  body { overflow: auto; }
+  main { height: auto; }
+  .panes { flex-direction: column; flex: none; }
+  .list { flex: 0 0 auto; max-height: 40vh; }
+  .detail { flex: none; min-height: 60vh; }
+  .msgs { max-height: 50vh; }
+  .msg { max-width: 90%; }
 }
 textarea { width: 100%; min-height: 3.5rem; font: inherit; box-sizing: border-box; }
 .banner-local { background: #b00020; color: #fff; padding: .6rem .8rem; border-radius: 6px;
@@ -612,12 +632,13 @@ APP_JS = """\
 
   const message = (m) => {
     const node = el('div', { class: 'msg' + (m.mine ? ' mine' : '') });
+    const bubble = el('div', { class: 'bubble' }, el('div', { class: 'body' }, m.body));
+    if (m.attachments.length) {
+      bubble.append(el('div', { class: 'meta' }, 'attachments: ' + m.attachments.join(', ')));
+    }
+    node.append(bubble);
     node.append(el('div', { class: 'meta' }, m.from + ' · ' + m.time + ' · ',
       el('span', { class: 'kind' }, m.kind)));
-    node.append(el('div', { class: 'body' }, m.body));
-    if (m.attachments.length) {
-      node.append(el('div', { class: 'meta' }, 'attachments: ' + m.attachments.join(', ')));
-    }
     return node;
   };
 
@@ -657,18 +678,24 @@ APP_JS = """\
   const detail = (view) => {
     const pane = el('div', { class: 'detail' });
     if (!view) {
-      pane.append(el('div', { class: 'meta' }, 'Выберите ветку слева.'));
+      pane.append(el('div', { class: 'detail-empty' }, 'Выберите ветку слева.'));
       return pane;
     }
-    pane.append(el('div', { class: 'meta' }, 'Ветка: ' + view.counterpart));
+    const row = ((state.data && state.data.threads) || [])
+      .find((t) => t.thread === state.selected);
+    const head = el('div', { class: 'detail-head' },
+      el('div', { class: 'detail-title' }, (row && row.title) || '(без текста)'),
+      el('div', { class: 'meta' }, 'Ветка: ' + view.counterpart));
+    pane.append(head);
     const list = el('div', { class: 'msgs', id: 'msgs' });
     for (const m of view.messages) list.append(message(m));
     pane.append(list);
+    const reply = el('div', { class: 'reply' });
     const box = answerBox(view);
-    if (box) pane.append(box);
-    if (view.say.mode === 'new') pane.append(el('div', { class: 'meta' }, view.say.hint));
+    if (box) reply.append(box);
+    if (view.say.mode === 'new') reply.append(el('div', { class: 'meta' }, view.say.hint));
     const area = el('textarea', {
-      placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area',
+      placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area', rows: 3,
     });
     area.value = state.say;
     area.addEventListener('input', () => { state.say = area.value; });
@@ -676,7 +703,8 @@ APP_JS = """\
     send.addEventListener('click', () => act(
       '/api/say', { thread: view.thread, body: area.value }, () => { state.say = ''; },
     ));
-    pane.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
+    reply.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
+    pane.append(reply);
     return pane;
   };
 
