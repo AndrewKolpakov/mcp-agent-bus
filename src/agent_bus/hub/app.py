@@ -163,7 +163,7 @@ class Hub:
 
     def hello(self, agent: str) -> Reply:
         """Who the token belongs to and where the WebSocket is: all a client needs to start."""
-        return Reply(200, {"agent": agent, "ws": self.ws_url})
+        return Reply(200, {"agent": agent, "ws": self.ws_url, "capabilities": ["thread"]})
 
     # --- events -------------------------------------------------------------
 

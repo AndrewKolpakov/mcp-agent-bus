@@ -439,7 +439,11 @@ def test_http_routes_through_the_adapter(hub: Hub) -> None:
 def test_hello_names_the_agent_and_the_websocket(table: Table, tokens: dict[str, str]) -> None:
     hub = Hub(table, RecordingPusher(), ws_url="wss://ws.example/bus")
     got = app.handler(http_event("GET", "/hello", "bob"), None, hub)
-    assert json.loads(got["body"]) == {"agent": "bob", "ws": "wss://ws.example/bus"}
+    assert json.loads(got["body"]) == {
+        "agent": "bob",
+        "ws": "wss://ws.example/bus",
+        "capabilities": ["thread"],
+    }
 
 
 def test_authorizers_resolve_tokens(hub: Hub, tokens: dict[str, str]) -> None:

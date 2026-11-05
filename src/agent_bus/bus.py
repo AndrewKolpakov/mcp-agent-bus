@@ -185,6 +185,11 @@ class Bus:
     ) -> MessageEvent:
         if thread is not None and reply_to is not None:
             raise BusError("pass reply_to or thread, not both")
+        if thread is not None:
+            # Only a hub-backed store has this; the local store always honours thread.
+            require = getattr(self.store, "require_thread_posts", None)
+            if require is not None:
+                require()
         try:
             to = check_agent_name(to)
         except ValueError as exc:

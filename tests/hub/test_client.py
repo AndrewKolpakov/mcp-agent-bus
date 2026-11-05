@@ -125,6 +125,52 @@ def test_a_thread_post_over_the_hub_keeps_the_thread_and_has_no_reply_to(client:
     assert result.id not in alice.state().acked
 
 
+def _old_hub(store: HubStore) -> list[dict[str, Any]]:
+    """Make the store's hub answer hello without capabilities; return the records posted."""
+    posted: list[dict[str, Any]] = []
+    real_post = store.api.post_event
+
+    def post(record: dict[str, Any]) -> dict[str, Any]:
+        posted.append(record)
+        return real_post(record)
+
+    store.api.hello = lambda: {"agent": "alice", "ws": ""}  # type: ignore[method-assign]
+    store.api.post_event = post  # type: ignore[method-assign]
+    return posted
+
+
+def test_a_thread_post_to_an_old_hub_fails_before_anything_is_posted(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    posted = _old_hub(alice_store)
+    with pytest.raises(BusError) as err:
+        alice.send("bob", "next", kind="task", thread=task.thread)
+    assert str(err.value) == (
+        "the hub does not support thread posts (hub too old); nothing was sent"
+    )
+    assert posted == []
+
+
+def test_a_normal_send_to_an_old_hub_needs_no_capability(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    posted = _old_hub(alice_store)
+    plain = alice.send("bob", "again", kind="task")
+    assert plain.thread == plain.id
+    assert [r["type"] for r in posted] == ["message"]
+    assert task.id != plain.id
+
+
+def test_a_thread_post_to_a_new_hub_is_accepted(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    assert "thread" in alice_store.api.hello()["capabilities"]
+    follow_up = alice.send("bob", "next", kind="task", thread=task.thread)
+    assert follow_up.thread == task.thread
+
+
 def test_the_hub_client_applies_the_same_thread_rules_as_the_local_bus(client: Client) -> None:
     alice, alice_store, _ = client("alice")
     bob, bob_store, _ = client("bob")

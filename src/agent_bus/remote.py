@@ -202,6 +202,19 @@ class HubStore:
         self.api = api
         self.home = home
         self.mirror = Store(home)
+        self._capabilities: frozenset[str] | None = None
+
+    def require_thread_posts(self) -> None:
+        """Refuse before anything is posted when the hub would ignore `thread`.
+
+        An old hub drops the field and opens a new thread, so the hub must
+        advertise "thread" in its hello (cached per store; absent key = old hub).
+        """
+        if self._capabilities is None:
+            caps = self.api.hello().get("capabilities")
+            self._capabilities = frozenset(caps) if isinstance(caps, list) else frozenset()
+        if "thread" not in self._capabilities:
+            raise BusError("the hub does not support thread posts (hub too old); nothing was sent")
 
     def ensure(self) -> None:
         self.mirror.ensure()
