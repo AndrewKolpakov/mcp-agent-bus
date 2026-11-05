@@ -202,6 +202,21 @@ class HubStore:
         self.api = api
         self.home = home
         self.mirror = Store(home)
+        self._thread_posts = False
+
+    def require_thread_posts(self) -> None:
+        """Refuse before anything is posted when the hub would ignore `thread`.
+
+        An old hub drops the field and opens a new thread, so the hub must
+        advertise "thread" in its hello. Only a positive answer is cached; an
+        absent or failed one is asked again, so a hub upgrade is picked up.
+        """
+        if self._thread_posts:
+            return
+        caps = self.api.hello().get("capabilities")
+        if not isinstance(caps, list) or "thread" not in caps:
+            raise BusError("the hub does not support thread posts (hub too old); nothing was sent")
+        self._thread_posts = True
 
     def ensure(self) -> None:
         self.mirror.ensure()
@@ -211,6 +226,20 @@ class HubStore:
         stored = EVENT_ADAPTER.validate_python(self.api.post_event(record))
         if stored.type != event.type:
             raise HubUnavailableError(f"hub stored a {stored.type} for a {event.type}")
+        if (
+            isinstance(event, MessageEvent)
+            and isinstance(stored, MessageEvent)
+            and event.reply_to is None
+            and event.thread != event.id
+            and stored.thread != event.thread
+        ):
+            # The hub dropped `thread` (rolled back to an old one): the message
+            # is posted, so say so, and ask the hub again next time.
+            self._thread_posts = False
+            raise BusError(
+                f"the hub put this message in a new thread {stored.thread}, not "
+                f"{event.thread}: it was posted, and the hub does not support thread posts"
+            )
         return cast(E, stored)
 
     def size(self) -> int:

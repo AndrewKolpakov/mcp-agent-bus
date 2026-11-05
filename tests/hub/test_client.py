@@ -107,6 +107,220 @@ def test_task_and_result_round_trip_through_the_hub(client: Client) -> None:
     assert task.id in alice.state().acked
 
 
+def test_a_thread_post_over_the_hub_keeps_the_thread_and_has_no_reply_to(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    task = alice.send("bob", "do it", kind="task")
+    bob_store.sync()
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    alice_store.sync()
+    follow_up = alice.send("bob", "next", kind="task", thread=task.thread)
+    assert follow_up.thread == task.thread
+    assert follow_up.id != task.thread
+    assert follow_up.reply_to is None
+    bob_store.sync()
+    assert [m.id for m in bob.history(thread=task.thread)] == [task.id, result.id, follow_up.id]
+    assert [m.id for m in bob.inbox()] == [follow_up.id]
+    # Nothing was acked by the thread post: the result is still unread by alice. Her mirror
+    # is synced first, so an ack written on the hub side would be seen here.
+    alice_store.sync()
+    assert result.id not in alice.state().acked
+
+
+def _old_hub(store: HubStore) -> list[dict[str, Any]]:
+    """Make the store's hub answer hello without capabilities; return the records posted."""
+    posted: list[dict[str, Any]] = []
+    real_post = store.api.post_event
+
+    def post(record: dict[str, Any]) -> dict[str, Any]:
+        posted.append(record)
+        return real_post(record)
+
+    store.api.hello = lambda: {"agent": "alice", "ws": ""}  # type: ignore[method-assign]
+    store.api.post_event = post  # type: ignore[method-assign]
+    return posted
+
+
+def test_a_thread_post_to_an_old_hub_fails_before_anything_is_posted(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    posted = _old_hub(alice_store)
+    with pytest.raises(BusError) as err:
+        alice.send("bob", "next", kind="task", thread=task.thread)
+    assert str(err.value) == (
+        "the hub does not support thread posts (hub too old); nothing was sent"
+    )
+    assert posted == []
+
+
+def test_a_normal_send_to_an_old_hub_needs_no_capability(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    posted = _old_hub(alice_store)
+    plain = alice.send("bob", "again", kind="task")
+    assert plain.thread == plain.id
+    assert [r["type"] for r in posted] == ["message"]
+    assert task.id != plain.id
+
+
+def test_a_thread_post_to_a_new_hub_is_accepted(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    assert "thread" in alice_store.api.hello()["capabilities"]
+    follow_up = alice.send("bob", "next", kind="task", thread=task.thread)
+    assert follow_up.thread == task.thread
+
+
+def _count_hellos(store: HubStore) -> list[int]:
+    """Count the hello calls the store's api makes (the list holds one running total)."""
+    calls = [0]
+    real_hello = store.api.hello
+
+    def hello() -> dict[str, Any]:
+        calls[0] += 1
+        return real_hello()
+
+    store.api.hello = hello  # type: ignore[method-assign]
+    return calls
+
+
+def test_a_positive_capability_is_asked_once_for_two_thread_posts(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    hellos = _count_hellos(alice_store)
+    alice.send("bob", "one", kind="task", thread=task.thread)
+    alice.send("bob", "two", kind="text", thread=task.thread)
+    assert hellos == [1]
+
+
+def test_a_negative_capability_is_not_cached_so_a_hub_upgrade_is_picked_up(
+    client: Client,
+) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    real_hello = alice_store.api.hello
+    alice_store.api.hello = lambda: {"agent": "alice", "ws": ""}  # type: ignore[method-assign]
+    posted = alice_store.api.post_event
+    sent: list[dict[str, Any]] = []
+
+    def record(rec: dict[str, Any]) -> dict[str, Any]:
+        sent.append(rec)
+        return posted(rec)
+
+    alice_store.api.post_event = record  # type: ignore[method-assign]
+    with pytest.raises(BusError, match="hub too old"):
+        alice.send("bob", "one", kind="task", thread=task.thread)
+    assert sent == []
+    # The hub is upgraded within the same session.
+    alice_store.api.hello = real_hello  # type: ignore[method-assign]
+    second = alice.send("bob", "two", kind="task", thread=task.thread)
+    assert second.thread == task.thread
+    assert len(sent) == 1
+
+
+def test_a_failed_hello_is_not_cached(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    real_hello = alice_store.api.hello
+
+    def down() -> dict[str, Any]:
+        raise HubUnavailableError("hub down")
+
+    alice_store.api.hello = down  # type: ignore[method-assign]
+    with pytest.raises(HubUnavailableError):
+        alice.send("bob", "one", kind="task", thread=task.thread)
+    alice_store.api.hello = real_hello  # type: ignore[method-assign]
+    assert alice.send("bob", "two", kind="task", thread=task.thread).thread == task.thread
+
+
+def test_a_hub_that_drops_the_thread_after_a_positive_hello_is_reported_as_posted(
+    client: Client,
+) -> None:
+    alice, alice_store, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    hellos = _count_hellos(alice_store)
+    alice.send("bob", "fine", kind="task", thread=task.thread)
+    assert hellos == [1]
+    real_post = alice_store.api.post_event
+
+    def forgetful(rec: dict[str, Any]) -> dict[str, Any]:
+        # A hub rolled back to a version that ignores the field.
+        return real_post({k: v for k, v in rec.items() if k != "thread"})
+
+    alice_store.api.post_event = forgetful  # type: ignore[method-assign]
+    with pytest.raises(BusError) as err:
+        alice.send("bob", "lost", kind="task", thread=task.thread)
+    text = str(err.value)
+    assert text.startswith("the hub put this message in a new thread ")
+    assert f", not {task.thread}: it was posted, and the hub does not support thread posts" in text
+    # It really was posted, in a thread of its own.
+    bob_store.sync()
+    lost = [m for m in bob.history(last=None) if m.body == "lost"]
+    assert len(lost) == 1
+    assert lost[0].thread == lost[0].id != task.thread
+    assert f"new thread {lost[0].id}," in text
+    # The capability is asked again after a mismatch.
+    alice_store.api.post_event = real_post  # type: ignore[method-assign]
+    alice.send("bob", "again", kind="task", thread=task.thread)
+    assert hellos == [2]
+
+
+def test_a_thread_post_of_a_result_or_a_handoff_is_refused_over_the_hub(client: Client) -> None:
+    alice, _, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    task = alice.send("bob", "do it", kind="task")
+    bob_store.sync()
+    hellos = _count_hellos(bob_store)
+    for kind in ("result", "await_human"):
+        with pytest.raises(BusError, match="a thread post must be kind task or text"):
+            bob.send("alice", "x", kind=kind, thread=task.thread)  # type: ignore[arg-type]
+    assert hellos == [0]
+    # The hub refuses it too, should a client send it anyway.
+    with pytest.raises(BusError, match="a thread post must be kind task or text"):
+        bob_store.api.post_event(
+            {
+                "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+                "type": "message",
+                "sender": "bob",
+                "to": "alice",
+                "kind": "result",
+                "body": "x",
+                "thread": task.thread,
+            }
+        )
+
+
+def test_the_hub_client_applies_the_same_thread_rules_as_the_local_bus(client: Client) -> None:
+    alice, alice_store, _ = client("alice")
+    bob, bob_store, _ = client("bob")
+    dave, dave_store, _ = client("dave")
+    task = alice.send("bob", "do it", kind="task")
+    alice_store.sync()
+    with pytest.raises(BusError, match="pass reply_to or thread, not both"):
+        alice.send("bob", "x", reply_to=task.id, thread=task.thread)
+    with pytest.raises(BusError, match="unknown thread: NOPE"):
+        alice.send("bob", "x", thread="NOPE")
+    with pytest.raises(BusError, match="must be the thread's other participant"):
+        alice.send("dave", "x", thread=task.thread)
+    # dave is on alice's team but not a party of the thread.
+    dave_store.sync()
+    with pytest.raises(BusError, match="unknown thread"):
+        dave.send("bob", "x", thread=task.thread)
+    # replying to a result is still refused through the hub.
+    bob_store.sync()
+    result = bob.send("alice", "done", kind="result", reply_to=task.id)
+    alice_store.sync()
+    with pytest.raises(BusError, match="ends its chain"):
+        alice.send("bob", "thanks", reply_to=result.id)
+
+
 def test_peers_are_teammates_and_count_only_my_unacked(client: Client) -> None:
     alice, alice_store, _ = client("alice")
     dave, _, _ = client("dave")

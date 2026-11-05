@@ -84,6 +84,10 @@ class EventStore(Protocol):
         """Write `event`; return it as stored, which on a hub carries `seq`."""
         ...
 
+    def require_thread_posts(self) -> None:
+        """Raise `BusError` before anything is posted when this store would ignore `thread`."""
+        ...
+
     def size(self) -> int: ...
 
     def read_from(self, offset: int = 0) -> ReadResult: ...
@@ -109,6 +113,9 @@ class Store:
         self.log_path = bus_dir / LOG_NAME
         self.sessions_dir = bus_dir / SESSIONS_DIR
         self.attachments_dir = bus_dir / ATTACHMENTS_DIR
+
+    def require_thread_posts(self) -> None:
+        """The local log always honours `thread`."""
 
     def ensure(self) -> None:
         self.bus_dir.mkdir(mode=0o700, parents=True, exist_ok=True)

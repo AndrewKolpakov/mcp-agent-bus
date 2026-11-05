@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--to", required=True, help="recipient agent name")
     send.add_argument("--kind", choices=KINDS, default="text")
     send.add_argument("--reply-to", help="id of the message this answers")
+    send.add_argument("--thread", help="post into this thread without replying to a message")
     send.add_argument(
         "-a", "--attach", action="append", default=[], metavar="PATH", help="attach a file"
     )
@@ -351,7 +352,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "send":
             body = sys.stdin.read() if args.body == "-" else args.body
             message = bus.send(
-                args.to, body, kind=args.kind, reply_to=args.reply_to, attachments=args.attach
+                args.to,
+                body,
+                kind=args.kind,
+                reply_to=args.reply_to,
+                attachments=args.attach,
+                thread=args.thread,
             )
             print(message.id)
         elif args.command == "inbox":

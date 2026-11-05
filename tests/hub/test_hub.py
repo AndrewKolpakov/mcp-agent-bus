@@ -82,6 +82,107 @@ def test_a_reply_inherits_the_thread(hub: Hub) -> None:
     assert reply["thread"] == first["id"]
 
 
+def test_a_thread_post_keeps_the_thread_and_has_no_reply_to(hub: Hub) -> None:
+    hub.rate_limit = 1000
+    first = send(hub, "alice", "bob", kind="task")
+    send(hub, "bob", "alice", kind="result", reply_to=first["id"])
+    follow_up = send(hub, "alice", "bob", "next", kind="task", thread=first["id"])
+    assert follow_up["thread"] == first["id"]
+    assert follow_up["id"] != first["id"]
+    assert "reply_to" not in follow_up
+    # Both directions, task or text, and nothing was acked.
+    back = send(hub, "bob", "alice", "ok", kind="text", thread=first["id"])
+    assert back["thread"] == first["id"]
+    assert [e["type"] for e in view(hub, "alice")] == ["message"] * 4
+    assert [e["id"] for e in view(hub, "bob")][-2:] == [follow_up["id"], back["id"]]
+
+
+def test_a_thread_post_on_the_hub_is_the_local_rule(hub: Hub) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    refused(
+        lambda: send(hub, "alice", "dave", thread=first["id"]),
+        422,
+        "the recipient of a thread message must be the thread's other participant",
+    )
+    refused(
+        lambda: send(hub, "bob", "dave", thread=first["id"]),
+        422,
+        "the recipient of a thread message must be the thread's other participant",
+    )
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_a_thread_post_of_a_result_or_a_handoff_is_a_422(hub: Hub, kind: str) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    refused(
+        lambda: send(hub, "bob", "alice", kind=kind, thread=first["id"]),
+        422,
+        "a thread post must be kind task or text; a result answers with reply_to",
+    )
+    assert len(view(hub, "alice")) == 1
+
+
+def test_a_thread_post_into_an_unknown_thread_is_a_404(hub: Hub) -> None:
+    refused(lambda: send(hub, "alice", "bob", thread=new_id()), 404, "unknown thread")
+    refused(lambda: send(hub, "alice", "bob", thread="../MSG"), 404, "unknown thread: ../MSG")
+
+
+def test_a_thread_post_by_a_non_participant_looks_like_an_unknown_thread(hub: Hub) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    # dave shares a team with both, but is no party of the thread.
+    for to in ("alice", "bob"):
+        refused(
+            lambda to=to: send(hub, "dave", to, thread=first["id"]),
+            404,
+            f"unknown thread: {first['id']}",
+        )
+    assert len(view(hub, "alice")) == 1
+
+
+def test_a_thread_must_be_a_threads_first_message(hub: Hub) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    reply = send(hub, "bob", "alice", kind="result", reply_to=first["id"])
+    refused(lambda: send(hub, "alice", "bob", thread=reply["id"]), 404, "unknown thread")
+
+
+def test_a_client_thread_is_ignored_when_reply_to_is_present(hub: Hub) -> None:
+    hub.rate_limit = 1000
+    first = send(hub, "alice", "bob", kind="task")
+    elsewhere = send(hub, "alice", "bob", kind="task")
+    reply = send(hub, "bob", "alice", kind="result", reply_to=first["id"], thread=elsewhere["id"])
+    assert reply["thread"] == first["id"]
+    junk = send(hub, "bob", "alice", kind="task", reply_to=first["id"], thread="not-a-thread")
+    assert junk["thread"] == first["id"]
+    # A reply to a result keeps the loop guard whatever thread the client claims.
+    refused(
+        lambda: send(hub, "alice", "bob", reply_to=reply["id"], thread=first["id"]),
+        422,
+        "ends its chain",
+    )
+
+
+def test_a_thread_equal_to_the_message_id_is_a_new_thread(hub: Hub) -> None:
+    msg_id = new_id()
+    record = send(hub, "alice", "bob", id=msg_id, thread=msg_id)
+    assert record["thread"] == msg_id == record["id"]
+
+
+def test_a_thread_post_keeps_the_rate_limit_and_the_team_check(hub: Hub) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    # carol is on no team with alice: the team check runs before any thread logic.
+    refused(
+        lambda: send(hub, "alice", "carol", thread=first["id"]), 403, "not on any of your teams"
+    )
+    refused(
+        lambda: send(hub, "carol", "alice", thread=first["id"]), 403, "not on any of your teams"
+    )
+    send(hub, "bob", "alice", thread=first["id"])
+    send(hub, "alice", "bob", thread=first["id"])
+    refused(lambda: send(hub, "bob", "alice", thread=first["id"]), 429, "kind='await_human'")
+    # The hand-off is not a thread post; it is the way past the limit.
+    send(hub, "bob", "alice", kind="await_human")
+
+
 def test_replying_to_someone_elses_message_looks_like_an_unknown_one(hub: Hub) -> None:
     theirs = send(hub, "alice", "bob")
     refused(lambda: send(hub, "dave", "bob", reply_to=theirs["id"]), 404, "unknown message id")
@@ -350,7 +451,11 @@ def test_http_routes_through_the_adapter(hub: Hub) -> None:
 def test_hello_names_the_agent_and_the_websocket(table: Table, tokens: dict[str, str]) -> None:
     hub = Hub(table, RecordingPusher(), ws_url="wss://ws.example/bus")
     got = app.handler(http_event("GET", "/hello", "bob"), None, hub)
-    assert json.loads(got["body"]) == {"agent": "bob", "ws": "wss://ws.example/bus"}
+    assert json.loads(got["body"]) == {
+        "agent": "bob",
+        "ws": "wss://ws.example/bus",
+        "capabilities": ["thread"],
+    }
 
 
 def test_authorizers_resolve_tokens(hub: Hub, tokens: dict[str, str]) -> None:

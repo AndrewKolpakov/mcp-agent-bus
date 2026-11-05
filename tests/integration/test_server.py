@@ -135,6 +135,61 @@ def test_tools_send_inbox_ack_and_peers(spawn: Spawn, bus_dir: Path) -> None:
     assert peers[0]["last_sent"] is not None
 
 
+def test_send_tool_schema_offers_thread_and_the_instructions_explain_it(spawn: Spawn) -> None:
+    server = spawn(handshake=False)
+    init = server.handshake()["result"]
+    tools = server.request("tools/list")["result"]["tools"]
+    send = next(t for t in tools if t["name"] == "send")
+    thread = send["inputSchema"]["properties"]["thread"]
+    assert thread["type"] == "string"
+    assert "Post into an existing thread without replying to a message" in thread["description"]
+    assert "Not with reply_to" in thread["description"]
+    assert "Only kind task or text" in thread["description"]
+    assert "thread" not in send["inputSchema"]["required"]
+    assert "thread=<thread>" in init["instructions"]
+
+
+def test_send_tool_passes_thread_through_after_a_result(spawn: Spawn, bus_dir: Path) -> None:
+    server = spawn()
+    alice = _alice(bus_dir)
+    task = alice.send("bob", "do it", kind="task")
+    server.channel_events()
+    result = tool_json(
+        server.call(
+            "send", {"to": "alice", "body": "done", "kind": "result", "reply_to": task.id}
+        )
+    )
+    # Replying to the result is refused; a thread post is the way on.
+    posted = tool_json(
+        server.call(
+            "send", {"to": "alice", "body": "one more", "kind": "text", "thread": task.thread}
+        )
+    )
+    for kind in ("result", "await_human"):
+        refused_kind = server.call(
+            "send", {"to": "alice", "body": "x", "kind": kind, "thread": task.thread}
+        )
+        assert refused_kind["isError"] is True
+        assert (
+            "a thread post must be kind task or text; a result answers with reply_to"
+            in refused_kind["content"][0]["text"]
+        )
+    assert posted["thread"] == task.thread == result["thread"]
+    last = alice.history(thread=task.thread, last=None)[-1]
+    assert (last.id, last.reply_to, last.sender) == (posted["msg_id"], None, "bob")
+
+    both = server.call(
+        "send",
+        {"to": "alice", "body": "x", "reply_to": task.id, "thread": task.thread},
+    )
+    assert both["isError"] is True
+    assert "pass reply_to or thread, not both" in both["content"][0]["text"]
+
+    unknown = server.call("send", {"to": "alice", "body": "x", "thread": "NOPE"})
+    assert unknown["isError"] is True
+    assert "unknown thread: NOPE" in unknown["content"][0]["text"]
+
+
 def test_tool_errors_come_back_as_error_results(spawn: Spawn, bus_dir: Path) -> None:
     server = spawn()
     alice = _alice(bus_dir)
