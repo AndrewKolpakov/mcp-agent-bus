@@ -544,6 +544,10 @@ textarea { width: 100%; min-height: 3.5rem; font: inherit; box-sizing: border-bo
 .error { color: #b00020; margin: .4rem 0; white-space: pre-wrap; }
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 .row label { display: inline-flex; align-items: center; gap: .25rem; margin-right: .6rem; }
+.voice { display: inline-flex; align-items: center; gap: .3rem; }
+.mic.recording { background: #d32f2f; border-color: #d32f2f; color: #fff; }
+.voice-lang { font-size: .75rem; padding: .3rem .4rem; }
+.voice-note { font-size: .75rem; color: #666; }
 """
 
 APP_JS = """\
@@ -582,6 +586,213 @@ APP_JS = """\
   const storedFilter = () => {
     const key = draftGet('filter');
     return FILTERS.some((f) => f[0] === key) ? key : '';
+  };
+
+  // --- voice: begin ---
+  const VOICE_LANGS = ['ru-RU', 'en-US'];
+  const VOICE_NOTE = 'Chrome sends audio to Google for recognition';
+  const voiceRecognizer = (win) => win.SpeechRecognition || win.webkitSpeechRecognition || null;
+  const voiceLangOf = (store) => {
+    try {
+      const lang = store.get('voiceLang');
+      return VOICE_LANGS.includes(lang) ? lang : 'ru-RU';
+    } catch (e) { return 'ru-RU'; }
+  };
+  const voiceMerge = (prefix, finalText, interim, suffix) => {
+    const spoken = finalText + interim;
+    const sep = prefix && prefix === prefix.trimEnd() && spoken ? ' ' : '';
+    const join = finalText && interim && finalText === finalText.trimEnd()
+      && interim === interim.trimStart() ? ' ' : '';
+    const inserted = finalText + join + interim;
+    return {
+      value: prefix + sep + inserted + suffix,
+      caret: prefix.length + sep.length + inserted.length,
+    };
+  };
+  // One recognition at a time: the active session is module-level. A session that is
+  // ended from outside (voiceStopAll, voiceStopIn, voiceSettle) is dead at once: its
+  // late result/end events from the browser never touch the field again.
+  let voiceActive = null;
+  const voiceStopAll = () => {
+    const session = voiceActive;
+    if (session) session.end(false);
+  };
+  // Ends the active session only if its field sits inside root (a box about to be replaced).
+  const voiceStopIn = (root) => {
+    const session = voiceActive;
+    if (!session || !root || !root.contains || !root.contains(session.field)) return;
+    session.end(false);
+  };
+  // Ends the active session of this field now, keeping its final text and dropping the
+  // interim, so the caller reads the field's value as it will be sent.
+  const voiceSettle = (field) => {
+    const session = voiceActive;
+    if (session && session.field === field) session.end(true);
+  };
+  const micFor = (field, deps) => {
+    const doc = deps.doc;
+    const box = doc.createElement('span');
+    box.className = 'voice';
+    const mic = doc.createElement('button');
+    mic.className = 'mic';
+    mic.type = 'button';
+    mic.textContent = '🎤';
+    const toggle = doc.createElement('button');
+    toggle.className = 'voice-lang';
+    toggle.type = 'button';
+    const note = doc.createElement('span');
+    note.className = 'voice-note';
+    box.append(mic, toggle, note);
+    const langText = () => (voiceLangOf(deps.store) === 'en-US' ? 'EN' : 'RU');
+    toggle.textContent = langText();
+
+    if (!voiceRecognizer(deps.win)) {
+      const msg = 'Голосовой ввод недоступен в этом браузере';
+      mic.disabled = true;
+      mic.title = msg;
+      note.textContent = msg;
+      toggle.style.display = 'none';
+      return box;
+    }
+    mic.title = 'Голосовой ввод (' + VOICE_NOTE + ')';
+
+    toggle.addEventListener('click', () => {
+      const next = voiceLangOf(deps.store) === 'ru-RU' ? 'en-US' : 'ru-RU';
+      try { deps.store.set('voiceLang', next); } catch (e) { /* not remembered */ }
+      toggle.textContent = next === 'en-US' ? 'EN' : 'RU';
+    });
+
+    let session = null;
+    const leave = () => {
+      mic.className = 'mic';
+      mic.setAttribute('aria-pressed', 'false');
+    };
+    const notify = () => {
+      try {
+        field.dispatchEvent(new deps.win.Event('input', { bubbles: true }));
+      } catch (e) { /* no Event constructor */ }
+    };
+    const show = (s, interim) => {
+      const merged = voiceMerge(s.prefix, s.finalText, interim, s.suffix);
+      field.value = merged.value;
+      if (field.setSelectionRange) {
+        try { field.setSelectionRange(merged.caret, merged.caret); } catch (e) { /* ignore */ }
+      }
+      notify();
+    };
+    const release = (s) => {
+      if (voiceActive === s) voiceActive = null;
+      if (session === s) session = null;
+    };
+
+    const start = () => {
+      voiceStopAll();
+      let r;
+      try {
+        const Rec = voiceRecognizer(deps.win);
+        r = new Rec();
+        r.lang = voiceLangOf(deps.store);
+        r.continuous = true;
+        r.interimResults = true;
+      } catch (e) {
+        note.textContent = 'Ошибка распознавания: ' + (e && e.message ? e.message : e);
+        return;
+      }
+      const length = field.value.length;
+      const from = field.selectionStart == null ? length : field.selectionStart;
+      const to = field.selectionEnd == null ? length : field.selectionEnd;
+      const s = {
+        field: field, dead: false,
+        prefix: field.value.slice(0, from), suffix: field.value.slice(to),
+        finalText: '', interim: '', errored: false,
+        stop: () => r.stop(),
+        end: (commit) => {
+          if (s.dead) return;
+          s.dead = true;
+          try { r.stop(); } catch (e) { /* already stopped */ }
+          try { if (r.abort) r.abort(); } catch (e) { /* already stopped */ }
+          if (commit) show(s, '');
+          leave();
+          if (!s.errored) note.textContent = '';
+          release(s);
+        },
+      };
+      r.onresult = (ev) => {
+        if (s.dead || field.isConnected === false) return;
+        let interim = '';
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const res = ev.results[i];
+          if (res.isFinal) s.finalText += res[0].transcript;
+          else interim += res[0].transcript;
+        }
+        s.interim = interim;
+        show(s, interim);
+      };
+      r.onerror = (ev) => {
+        if (s.dead) return;
+        const code = ev && ev.error;
+        s.errored = true;
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          mic.disabled = true;
+          note.textContent = 'Нет доступа к микрофону';
+        } else if (code === 'no-speech') {
+          note.textContent = 'Речь не распознана';
+        } else {
+          note.textContent = 'Ошибка распознавания: ' + code;
+        }
+        leave();
+        release(s);
+      };
+      r.onend = () => {
+        if (s.dead) return;
+        s.dead = true;
+        if (field.isConnected !== false) show(s, '');
+        leave();
+        if (!s.errored) note.textContent = '';
+        release(s);
+      };
+      session = s;
+      voiceActive = s;
+      mic.className = 'mic recording';
+      mic.setAttribute('aria-pressed', 'true');
+      note.textContent = 'Запись… (Esc — стоп)';
+      try {
+        r.start();
+      } catch (e) {
+        leave();
+        release(s);
+        note.textContent = 'Ошибка распознавания: ' + (e && e.message ? e.message : e);
+      }
+    };
+
+    mic.addEventListener('click', () => {
+      if (session) {
+        try { session.stop(); } catch (e) { /* already stopped */ }
+      } else {
+        start();
+      }
+    });
+    field.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && session) {
+        ev.preventDefault();
+        try { session.stop(); } catch (e) { /* already stopped */ }
+      }
+    });
+    return box;
+  };
+  // --- voice: end ---
+
+  // Voice input is optional: a failure to build it leaves the box without a mic.
+  const micOf = (field) => {
+    try {
+      return micFor(field, {
+        win: window, doc: document,
+        store: {
+          get: (k) => sessionStorage.getItem(k),
+          set: (k, v) => sessionStorage.setItem(k, v),
+        },
+      });
+    } catch (e) { return null; }
   };
 
   const state = {
@@ -639,6 +850,7 @@ APP_JS = """\
       if (state.selected !== thread) {
         state.choice = '';
         state.say = draftGet('draft:' + thread);
+        voiceStopIn(detailPane);
         stopCountdown();
       }
       state.selected = thread;
@@ -852,9 +1064,14 @@ APP_JS = """\
           draftPut('answer:' + taskId, field.value);
           submit.disabled = !field.value.trim();
         });
-        submit.addEventListener('click', () => sendAnswer(taskId, field.value.trim()));
+        submit.addEventListener('click', () => {
+          voiceSettle(field);
+          sendAnswer(taskId, field.value.trim());
+        });
         bindSend(field, submit);
-        box.append(el('div', { class: 'row' }, field), el('div', { class: 'row' }, submit));
+        const mic = micOf(field);
+        box.append(el('div', { class: 'row' }, field),
+          el('div', { class: 'row' }, submit, ...(mic ? [mic] : [])));
       }
       return box;
     }
@@ -879,6 +1096,7 @@ APP_JS = """\
     const key = replyKeyOf(view);
     if (!force && key === state.replyKey) return;
     state.replyKey = key;
+    voiceStopIn(replyBox);
     replyBox.replaceChildren();
     const box = answerBox(view);
     if (box) replyBox.append(box);
@@ -895,12 +1113,17 @@ APP_JS = """\
         draftPut('draft:' + view.thread, area.value);
       });
       const send = el('button', {}, 'Отправить');
-      send.addEventListener('click', () => act(
-        '/api/say', { thread: view.thread, body: area.value },
-        () => { state.say = ''; draftDrop('draft:' + view.thread); },
-      ));
+      send.addEventListener('click', () => {
+        voiceSettle(area);
+        act(
+          '/api/say', { thread: view.thread, body: area.value },
+          () => { state.say = ''; draftDrop('draft:' + view.thread); },
+        );
+      });
       bindSend(area, send);
-      replyBox.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
+      const mic = micOf(area);
+      replyBox.append(el('div', { class: 'row' }, area),
+        el('div', { class: 'row' }, send, ...(mic ? [mic] : [])));
     }
   };
 
@@ -929,11 +1152,13 @@ APP_JS = """\
   const updateDetail = (force) => {
     const view = state.view;
     if (!view) {
+      voiceStopIn(detailPane);
       if (detailPane.firstChild !== detailEmpty) detailPane.replaceChildren(detailEmpty);
       state.shownThread = null;
       return;
     }
     if (state.shownThread !== state.selected) {
+      voiceStopIn(detailPane);
       detailPane.replaceChildren(headBox, msgsBox, replyBox);
       state.shownThread = state.selected;
       state.replyKey = '';
@@ -1006,13 +1231,18 @@ APP_JS = """\
     draftPut('compose', composeArea.value);
   });
   const composeSend = el('button', {}, 'Отправить');
-  composeSend.addEventListener('click', () => act(
-    '/api/send', { body: composeArea.value },
-    () => { state.newBody = ''; composeArea.value = ''; draftDrop('compose'); },
-  ));
+  composeSend.addEventListener('click', () => {
+    voiceSettle(composeArea);
+    act(
+      '/api/send', { body: composeArea.value },
+      () => { state.newBody = ''; composeArea.value = ''; draftDrop('compose'); },
+    );
+  });
   bindSend(composeArea, composeSend);
+  const composeMic = micOf(composeArea);
   const composeCard = el('div', { class: 'card' },
-    composeLabel, composeArea, el('div', { class: 'row' }, composeSend));
+    composeLabel, composeArea,
+    el('div', { class: 'row' }, composeSend, ...(composeMic ? [composeMic] : [])));
 
   const filterButtons = {};
   const filterBar = el('div', { class: 'filters' });

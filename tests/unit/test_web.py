@@ -3,6 +3,8 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -1568,3 +1570,868 @@ def test_run_start_line_in_hub_mode(
         captured.out,
     )
     assert "WARNING" not in captured.err
+
+
+# --- voice input (Web Speech API) -------------------------------------------
+
+VOICE_BEGIN = "// --- voice: begin ---"
+VOICE_END = "// --- voice: end ---"
+
+_VOICE_PRELUDE = r"""
+const SECTION = __SECTION__;
+const S = new Function(
+  SECTION + "\nreturn {VOICE_LANGS, VOICE_NOTE, voiceRecognizer, voiceLangOf, voiceMerge,"
+  + " voiceStopAll, voiceStopIn, voiceSettle, micFor};"
+)();
+const ALL = [];
+class Ev { constructor(type, init) { this.type = type; Object.assign(this, init || {}); } }
+class El {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this.listeners = {}; this.className = '';
+    this.textContent = ''; this.title = ''; this.disabled = false; this.style = {};
+    this.attrs = {}; this.clicks = 0; this.value = ''; this.selectionStart = 0;
+    this.selectionEnd = 0; this.events = []; ALL.push(this);
+  }
+  append(...c) { this.children.push(...c); }
+  contains(n) { return n === this || this.children.some((c) => c.contains && c.contains(n)); }
+  appendChild(c) { this.children.push(c); return c; }
+  addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
+  dispatchEvent(ev) {
+    this.events.push(ev.type);
+    (this.listeners[ev.type] || []).slice().forEach((f) => f(ev));
+    return true;
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; }
+  click() { this.clicks++; this.dispatchEvent(new Ev('click')); }
+}
+function makeRec() {
+  return class FakeRec {
+    constructor() {
+      FakeRec.instances.push(this); this.starts = 0; this.stops = 0; this.aborts = 0;
+    }
+    start() { this.starts++; }
+    stop() { this.stops++; }
+    abort() { this.aborts++; }
+  };
+}
+function withInstances(C) { C.instances = []; return C; }
+function mkWin(extra) {
+  const fetchCalls = [];
+  const win = Object.assign({
+    Event: Ev, fetchCalls, fetch: (...a) => { fetchCalls.push(a); },
+  }, extra || {});
+  return win;
+}
+function mkStore(initial, opts) {
+  opts = opts || {};
+  const data = Object.assign({}, initial || {});
+  const sets = [];
+  return {
+    data, sets,
+    get(k) { if (opts.throwGet) throw new Error('get'); return k in data ? data[k] : null; },
+    set(k, v) { if (opts.throwSet) throw new Error('set'); sets.push([k, v]); data[k] = v; },
+  };
+}
+function mkField(value, start, end) {
+  const f = new El('textarea');
+  f.value = value; f.selectionStart = start; f.selectionEnd = end === undefined ? start : end;
+  return f;
+}
+function byClass(box, cls) {
+  return box.children.find((c) => String(c.className).split(/\s+/).includes(cls));
+}
+function parts(box) {
+  return {
+    mic: byClass(box, 'mic'),
+    lang: byClass(box, 'voice-lang'),
+    note: byClass(box, 'voice-note'),
+  };
+}
+function fire(el, type, init) { const e = new Ev(type, init); el.dispatchEvent(e); return e; }
+function res(isFinal, text) { return Object.assign([{ transcript: text }], { isFinal }); }
+function resultEv(resultIndex, list) { return { resultIndex, results: list }; }
+function mkDeps(RecClass, storeInit, storeOpts, winKey) {
+  const win = mkWin(RecClass ? { [winKey || 'webkitSpeechRecognition']: RecClass } : {});
+  const store = mkStore(storeInit, storeOpts);
+  const doc = { createElement: (t) => new El(t) };
+  return { win, doc, store };
+}
+let out = {};
+"""
+
+_VOICE_POSTLUDE = "\nconsole.log(JSON.stringify(out));\n"
+
+
+def _voice_section(client: Client) -> str:
+    status, _, data = client.request("GET", "/app.js")
+    assert status == 200
+    text = data.decode()
+    assert text.count(VOICE_BEGIN) == 1
+    assert text.count(VOICE_END) == 1
+    _head, rest = text.split(VOICE_BEGIN)
+    section, _tail = rest.split(VOICE_END)
+    return section
+
+
+def _voice_run(client: Client, tmp_path: Path, body: str) -> Any:
+    node = shutil.which("node")
+    assert node, "node is required on PATH for the voice behaviour tests"
+    section = _voice_section(client)
+    script = (
+        _VOICE_PRELUDE.replace("__SECTION__", json.dumps(section)) + body + _VOICE_POSTLUDE
+    )
+    path = tmp_path / "voice_probe.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run(
+        [node, str(path)], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_voice_section_markers_exist_exactly_once(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert text.count(VOICE_BEGIN) == 1
+    assert text.count(VOICE_END) == 1
+    assert text.index(VOICE_BEGIN) < text.index(VOICE_END)
+    lines = [line.strip() for line in text.splitlines()]
+    assert VOICE_BEGIN in lines
+    assert VOICE_END in lines
+
+
+def test_voice_section_exports_the_fixed_interface(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+out = {
+  langs: S.VOICE_LANGS, note: S.VOICE_NOTE,
+  types: [typeof S.voiceRecognizer, typeof S.voiceLangOf, typeof S.voiceMerge,
+          typeof S.voiceStopAll, typeof S.micFor],
+  none: S.voiceRecognizer({}),
+  std: S.voiceRecognizer({SpeechRecognition: 'a', webkitSpeechRecognition: 'b'}),
+  wk: S.voiceRecognizer({webkitSpeechRecognition: 'b'}),
+};
+""",
+    )
+    assert out["langs"] == ["ru-RU", "en-US"]
+    assert out["note"] == "Chrome sends audio to Google for recognition"
+    assert out["types"] == ["function"] * 5
+    assert out["none"] is None
+    assert out["std"] == "a"
+    assert out["wk"] == "b"
+
+
+def test_voice_lang_of_defaults_and_validates(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+out = {
+  dflt: S.voiceLangOf(mkStore({})),
+  en: S.voiceLangOf(mkStore({voiceLang: 'en-US'})),
+  ru: S.voiceLangOf(mkStore({voiceLang: 'ru-RU'})),
+  garbage: S.voiceLangOf(mkStore({voiceLang: 'xx-XX'})),
+  empty: S.voiceLangOf(mkStore({voiceLang: ''})),
+  throws: S.voiceLangOf(mkStore({}, {throwGet: true})),
+};
+""",
+    )
+    assert out == {
+        "dflt": "ru-RU",
+        "en": "en-US",
+        "ru": "ru-RU",
+        "garbage": "ru-RU",
+        "empty": "ru-RU",
+        "throws": "ru-RU",
+    }
+
+
+def test_voice_unsupported_browser_disables_the_mic_without_throwing(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const d = mkDeps(null, {});
+const field = mkField('', 0);
+let threw = false, box;
+try { box = S.micFor(field, d); } catch (e) { threw = String(e); }
+const p = parts(box);
+let clickThrew = false;
+try { fire(p.mic, 'click'); } catch (e) { clickThrew = String(e); }
+out = {
+  threw, clickThrew, tag: box.tagName, cls: box.className,
+  mic: { disabled: p.mic.disabled, title: p.mic.title, cls: p.mic.className },
+  note: p.note.textContent, langDisplay: p.lang.style.display,
+  box: box.children.length,
+};
+""",
+    )
+    assert out["threw"] is False
+    assert out["clickThrew"] is False
+    assert out["tag"] == "span"
+    assert out["cls"] == "voice"
+    assert out["box"] == 3
+    assert out["mic"]["disabled"] is True
+    assert out["mic"]["title"] == "Голосовой ввод недоступен в этом браузере"
+    assert out["note"] == "Голосовой ввод недоступен в этом браузере"
+    assert out["langDisplay"] == "none"
+
+
+@pytest.mark.parametrize("key", ["webkitSpeechRecognition", "SpeechRecognition"])
+def test_voice_supported_browser_enables_the_mic(
+    client: Client, tmp_path: Path, key: str
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const d = mkDeps(withInstances(makeRec()), {}, {}, %s);
+const box = S.micFor(mkField('', 0), d);
+const p = parts(box);
+out = {
+  cls: box.className, tag: box.tagName,
+  disabled: p.mic.disabled, title: p.mic.title, text: p.mic.textContent,
+  micCls: p.mic.className, langText: p.lang.textContent, langDisplay: p.lang.style.display,
+  note: p.note.textContent,
+};
+""".replace("%s", json.dumps(key)),
+    )
+    assert out["tag"] == "span"
+    assert out["cls"] == "voice"
+    assert out["disabled"] is False
+    assert out["title"] == "Голосовой ввод (Chrome sends audio to Google for recognition)"
+    assert out["text"] == "🎤"
+    assert out["micCls"] == "mic"
+    assert out["langText"] == "RU"
+    assert out.get("langDisplay") != "none"
+    assert out["note"] in ("", None)
+
+
+def test_voice_recognizer_is_looked_up_at_click_time(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const A = withInstances(makeRec());
+const B = withInstances(makeRec());
+const d = mkDeps(A, {});
+const p = parts(S.micFor(mkField('', 0), d));
+d.win.webkitSpeechRecognition = B;
+fire(p.mic, 'click');
+out = { a: A.instances.length, b: B.instances.length, bStarts: B.instances[0].starts };
+""",
+    )
+    assert out == {"a": 0, "b": 1, "bStarts": 1}
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [(None, "ru-RU"), ("en-US", "en-US"), ("ru-RU", "ru-RU"), ("garbage", "ru-RU")],
+)
+def test_voice_start_configures_the_recognizer(
+    client: Client, tmp_path: Path, stored: str | None, expected: str
+) -> None:
+    init = "{}" if stored is None else json.dumps({"voiceLang": stored})
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, %s);
+const field = mkField('hello', 5);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+out = {
+  n: Rec.instances.length, lang: r.lang, cont: r.continuous, interim: r.interimResults,
+  starts: r.starts, cls: p.mic.className, pressed: p.mic.getAttribute('aria-pressed'),
+  note: p.note.textContent,
+};
+""".replace("%s", init),
+    )
+    assert out["n"] == 1
+    assert out["lang"] == expected
+    assert out["cont"] is True
+    assert out["interim"] is True
+    assert out["starts"] == 1
+    assert out["cls"] == "mic recording"
+    assert out["pressed"] == "true"
+    assert out["note"] == "Запись… (Esc — стоп)"
+
+
+def test_voice_interim_is_shown_then_replaced_and_finals_land_at_the_caret(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('abcyz', 3);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+const snaps = [];
+function snap() { snaps.push([field.value, field.selectionStart, field.selectionEnd]); }
+r.onresult(resultEv(0, [res(false, 'he')])); snap();
+r.onresult(resultEv(0, [res(false, 'hello')])); snap();
+r.onresult(resultEv(0, [res(true, 'hello world')])); snap();
+r.onresult(resultEv(1, [res(true, 'hello world'), res(false, 'and')])); snap();
+r.onresult(resultEv(1, [res(true, 'hello world'), res(true, ' and more')])); snap();
+const inputsBeforeEnd = field.events.filter((t) => t === 'input').length;
+r.onend();
+out = {
+  snaps, inputsBeforeEnd,
+  inputsTotal: field.events.filter((t) => t === 'input').length,
+  final: field.value, cls: p.mic.className, pressed: p.mic.getAttribute('aria-pressed'),
+  note: p.note.textContent,
+};
+""",
+    )
+    assert out["snaps"] == [
+        ["abc heyz", 6, 6],
+        ["abc helloyz", 9, 9],
+        ["abc hello worldyz", 15, 15],
+        ["abc hello world andyz", 19, 19],
+        ["abc hello world and moreyz", 24, 24],
+    ]
+    # one bubbling 'input' per result, plus one on end
+    assert out["inputsBeforeEnd"] == 5
+    assert out["inputsTotal"] == 6
+    assert out["final"] == "abc hello world and moreyz"
+    assert out["cls"] == "mic"
+    assert out["pressed"] == "false"
+    assert out["note"] == ""
+
+
+def test_voice_input_event_bubbles_and_reaches_the_field_listener(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('', 0);
+const seen = [];
+field.addEventListener('input', (e) => seen.push([field.value, e.bubbles === true]));
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+Rec.instances[0].onresult(resultEv(0, [res(false, 'hi')]));
+out = { seen };
+""",
+    )
+    assert out["seen"] == [["hi", True]]
+
+
+def test_voice_end_drops_interim_text(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('abcyz', 3);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+r.onresult(resultEv(0, [res(false, 'pending')]));
+const during = field.value;
+r.onend();
+out = {
+  during, after: field.value, cls: p.mic.className,
+  pressed: p.mic.getAttribute('aria-pressed'), note: p.note.textContent,
+};
+""",
+    )
+    assert out["during"] == "abc pendingyz"
+    assert out["after"] == "abcyz"
+    assert out["cls"] == "mic"
+    assert out["pressed"] == "false"
+    assert out["note"] == ""
+
+
+def test_voice_selection_range_is_split_into_prefix_and_suffix(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('abcXXXyz', 3, 6);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+Rec.instances[0].onresult(resultEv(0, [res(true, 'ok')]));
+out = { value: field.value, caret: field.selectionStart };
+""",
+    )
+    assert out == {"value": "abc okyz", "caret": 6}
+
+
+def test_voice_second_click_stops(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const p = parts(S.micFor(mkField('', 0), d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+fire(p.mic, 'click');
+out = { n: Rec.instances.length, stops: r.stops, starts: r.starts };
+r.onend();
+fire(p.mic, 'click');
+out.after = Rec.instances.length;
+""",
+    )
+    assert out["n"] == 1
+    assert out["stops"] == 1
+    assert out["starts"] == 1
+    assert out["after"] == 2  # idle again after onend: a new session starts
+
+
+def test_voice_escape_stops_only_while_recording(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('', 0);
+const p = parts(S.micFor(field, d));
+let idlePrevented = false;
+fire(field, 'keydown', { key: 'Escape', preventDefault() { idlePrevented = true; } });
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+let otherPrevented = false;
+fire(field, 'keydown', { key: 'a', preventDefault() { otherPrevented = true; } });
+const stopsAfterOther = r.stops;
+let escPrevented = false;
+fire(field, 'keydown', { key: 'Escape', preventDefault() { escPrevented = true; } });
+out = {
+  idlePrevented, otherPrevented, stopsAfterOther, stops: r.stops, escPrevented,
+  idleInstances: Rec.instances.length,
+};
+""",
+    )
+    assert out["idlePrevented"] is False
+    assert out["otherPrevented"] is False
+    assert out["stopsAfterOther"] == 0
+    assert out["stops"] == 1
+    assert out["escPrevented"] is True
+    assert out["idleInstances"] == 1
+
+
+def test_voice_a_second_session_stops_the_first(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const f1 = mkField('', 0), f2 = mkField('', 0);
+const p1 = parts(S.micFor(f1, d)), p2 = parts(S.micFor(f2, d));
+fire(p1.mic, 'click');
+const r1 = Rec.instances[0];
+fire(p2.mic, 'click');
+const r2 = Rec.instances[1];
+out = { n: Rec.instances.length, r1stops: r1.stops, r2stops: r2.stops, r2starts: r2.starts };
+S.voiceStopAll();
+out.r2stopsAfterAll = r2.stops;
+let threw = false;
+try { r1.onend(); r2.onend(); S.voiceStopAll(); } catch (e) { threw = String(e); }
+out.threw = threw;
+""",
+    )
+    assert out["n"] == 2
+    assert out["r1stops"] == 1
+    assert out["r2stops"] == 0
+    assert out["r2starts"] == 1
+    assert out["r2stopsAfterAll"] == 1
+    assert out["threw"] is False
+
+
+def test_voice_stop_all_without_a_session_is_a_noop(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+let threw = false;
+try { S.voiceStopAll(); } catch (e) { threw = String(e); }
+out = { threw };
+""",
+    )
+    assert out == {"threw": False}
+
+
+@pytest.mark.parametrize("code", ["not-allowed", "service-not-allowed"])
+def test_voice_permission_errors_disable_the_mic(
+    client: Client, tmp_path: Path, code: str
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const p = parts(S.micFor(mkField('', 0), d));
+fire(p.mic, 'click');
+let threw = false;
+try { Rec.instances[0].onerror({ error: %s }); } catch (e) { threw = String(e); }
+out = {
+  threw, disabled: p.mic.disabled, note: p.note.textContent, cls: p.mic.className,
+  pressed: p.mic.getAttribute('aria-pressed'),
+};
+""".replace("%s", json.dumps(code)),
+    )
+    assert out["threw"] is False
+    assert out["disabled"] is True
+    assert out["note"] == "Нет доступа к микрофону"
+    assert out["cls"] == "mic"
+    assert out["pressed"] == "false"
+
+
+@pytest.mark.parametrize(
+    ("code", "note"),
+    [
+        ("no-speech", "Речь не распознана"),
+        ("network", "Ошибка распознавания: network"),
+        ("audio-capture", "Ошибка распознавания: audio-capture"),
+    ],
+)
+def test_voice_other_errors_set_a_note_and_leave_recording(
+    client: Client, tmp_path: Path, code: str, note: str
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const p = parts(S.micFor(mkField('', 0), d));
+fire(p.mic, 'click');
+let threw = false;
+try { Rec.instances[0].onerror({ error: %s }); } catch (e) { threw = String(e); }
+out = {
+  threw, disabled: p.mic.disabled, note: p.note.textContent, cls: p.mic.className,
+  pressed: p.mic.getAttribute('aria-pressed'),
+};
+""".replace("%s", json.dumps(code)),
+    )
+    assert out["threw"] is False
+    assert out["disabled"] is False
+    assert out["note"] == note
+    assert out["cls"] == "mic"
+    assert out["pressed"] == "false"
+
+
+def test_voice_lang_toggle_flips_and_persists(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const p = parts(S.micFor(mkField('', 0), d));
+const t0 = p.lang.textContent;
+fire(p.lang, 'click');
+const t1 = p.lang.textContent;
+fire(p.mic, 'click');
+const l1 = Rec.instances[0].lang;
+Rec.instances[0].onend();
+fire(p.lang, 'click');
+const t2 = p.lang.textContent;
+fire(p.mic, 'click');
+const l2 = Rec.instances[1].lang;
+const en = parts(S.micFor(mkField('', 0), mkDeps(Rec, { voiceLang: 'en-US' }))).lang.textContent;
+out = { t0, t1, t2, l1, l2, sets: d.store.sets, en };
+""",
+    )
+    assert (out["t0"], out["t1"], out["t2"]) == ("RU", "EN", "RU")
+    assert (out["l1"], out["l2"]) == ("en-US", "ru-RU")
+    assert out["sets"] == [["voiceLang", "en-US"], ["voiceLang", "ru-RU"]]
+    assert out["en"] == "EN"
+
+
+def test_voice_lang_toggle_survives_a_throwing_store(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {}, { throwSet: true, throwGet: true });
+let threw = false, p;
+try {
+  p = parts(S.micFor(mkField('', 0), d));
+  fire(p.lang, 'click');
+  fire(p.mic, 'click');
+} catch (e) { threw = String(e); }
+out = { threw, text: p.lang.textContent, started: Rec.instances.length };
+""",
+    )
+    assert out["threw"] is False
+    assert out["text"] == "EN"
+    assert out["started"] == 1
+
+
+def test_voice_never_sends_anything(client: Client, tmp_path: Path) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('abc', 3);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+r.onresult(resultEv(0, [res(false, 'x')]));
+r.onresult(resultEv(0, [res(true, 'xy')]));
+fire(field, 'keydown', { key: 'Escape', preventDefault() {} });
+r.onerror({ error: 'no-speech' });
+r.onend();
+fire(p.lang, 'click');
+out = {
+  clicks: ALL.map((e) => e.clicks),
+  fetches: d.win.fetchCalls.length,
+  submits: ALL.reduce((n, e) => n + e.events.filter((t) => t === 'submit').length, 0),
+};
+""",
+    )
+    assert sum(out["clicks"]) == 0
+    assert out["fetches"] == 0
+    assert out["submits"] == 0
+
+
+@pytest.mark.parametrize(
+    ("args", "value", "caret"),
+    [
+        (("", "a", "", ""), "a", 1),
+        (("abc", "def", "", ""), "abc def", 7),
+        (("abc ", "def", "", ""), "abc def", 7),
+        (("abc\n", "def", "", ""), "abc\ndef", 7),
+        (("abc", "", "x", "yz"), "abc xyz", 5),
+        (("a", "b", "c", "z"), "a b cz", 5),
+        (("a", "b ", "c", ""), "a b c", 5),
+        (("abc", "", "", "yz"), "abcyz", 3),
+        (("", "", "x", ""), "x", 1),
+        (("", "a b", "", "tail"), "a btail", 3),
+        (("abc", "", "", ""), "abc", 3),
+        (("a", "b", " c", ""), "a b c", 5),
+        (("a", "b", "\tc", ""), "a b\tc", 5),
+    ],
+)
+def test_voice_merge_table(
+    client: Client, tmp_path: Path, args: tuple[str, str, str, str], value: str, caret: int
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        "out = S.voiceMerge(..." + json.dumps(list(args)) + ");",
+    )
+    assert out == {"value": value, "caret": caret}
+
+
+_ORPHAN_SETUP = """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('T1 ', 3);
+const state = { say: 'T2 draft', draft: 'T2 draft' };
+// the box's own input listener, as the page wires it
+field.addEventListener('input', () => { state.say = field.value; state.draft = field.value; });
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+r.onresult(resultEv(0, [res(true, 'secret')]));
+"""
+
+
+def test_voice_stop_all_kills_the_session_so_late_events_write_nothing(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        _ORPHAN_SETUP
+        + """
+state.say = 'T2 draft'; state.draft = 'T2 draft'; field.value = 'T2 draft';
+const inputsBefore = field.events.length;
+S.voiceStopAll();
+const clsRightAfter = p.mic.className, pressedRightAfter = p.mic.getAttribute('aria-pressed');
+r.onresult(resultEv(1, [res(true, ' late')]));
+r.onerror({ error: 'aborted' });
+r.onend();
+out = {
+  clsRightAfter, pressedRightAfter, note: p.note.textContent, value: field.value,
+  say: state.say, draft: state.draft, newInputs: field.events.length - inputsBefore,
+  stops: r.stops,
+};
+// a fresh session can start at once
+fire(p.mic, 'click');
+out.restarted = Rec.instances.length === 2 && Rec.instances[1].starts === 1;
+""",
+    )
+    assert out["clsRightAfter"] == "mic"
+    assert out["pressedRightAfter"] == "false"
+    assert out["note"] == ""
+    assert out["value"] == "T2 draft"
+    assert out["say"] == "T2 draft"
+    assert out["draft"] == "T2 draft"
+    assert out["newInputs"] == 0
+    assert out["stops"] >= 1
+    assert out["restarted"] is True
+
+
+def test_voice_stop_in_ends_only_a_session_inside_the_root(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const inside = mkField('', 0), outside = mkField('', 0);
+const root = new El('div'); root.append(inside);
+const pi = parts(S.micFor(inside, d)), po = parts(S.micFor(outside, d));
+fire(po.mic, 'click');
+const ro = Rec.instances[0];
+S.voiceStopIn(root);
+out = { outsideCls: po.mic.className, outsideStops: ro.stops };
+ro.onresult(resultEv(0, [res(true, 'kept')]));
+out.outsideValue = outside.value;
+fire(pi.mic, 'click');
+const ri = Rec.instances[1];
+S.voiceStopIn(root);
+out.insideCls = pi.mic.className;
+ri.onresult(resultEv(0, [res(true, 'dropped')]));
+ri.onend();
+out.insideValue = inside.value;
+out.noRoot = true;
+try { S.voiceStopIn(null); S.voiceStopIn({}); } catch (e) { out.noRoot = String(e); }
+""",
+    )
+    assert out["outsideCls"] == "mic recording"
+    assert out["outsideStops"] == 0
+    assert out["outsideValue"] == "kept"
+    assert out["insideCls"] == "mic"
+    assert out["insideValue"] == ""
+    assert out["noRoot"] is True
+
+
+def test_voice_settle_keeps_final_drops_interim_and_ignores_late_events(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('Hi', 2);
+const other = mkField('', 0);
+const state = { say: '' };
+field.addEventListener('input', () => { state.say = field.value; });
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+r.onresult(resultEv(0, [res(true, 'there'), res(false, ' wor')]));
+const during = field.value;
+S.voiceSettle(other);
+const stillRecording = p.mic.className;
+S.voiceSettle(field);
+const settled = field.value, cls = p.mic.className;
+// the owner sends: the page clears the box and the draft
+field.value = ''; state.say = '';
+r.onresult(resultEv(1, [res(true, ' more')]));
+r.onend();
+out = { during, stillRecording, settled, cls, value: field.value, say: state.say };
+""",
+    )
+    assert out["during"] == "Hi there wor"
+    assert out["stillRecording"] == "mic recording"
+    assert out["settled"] == "Hi there"
+    assert out["cls"] == "mic"
+    assert out["value"] == ""
+    assert out["say"] == ""
+
+
+def test_voice_detached_field_is_not_written_by_late_events(
+    client: Client, tmp_path: Path
+) -> None:
+    out = _voice_run(
+        client,
+        tmp_path,
+        """
+const Rec = withInstances(makeRec());
+const d = mkDeps(Rec, {});
+const field = mkField('x', 1);
+const p = parts(S.micFor(field, d));
+fire(p.mic, 'click');
+const r = Rec.instances[0];
+field.isConnected = false;
+r.onresult(resultEv(0, [res(true, 'ghost')]));
+r.onend();
+out = { value: field.value, inputs: field.events.length, cls: p.mic.className };
+""",
+    )
+    assert out["value"] == "x"
+    assert out["inputs"] == 0
+    assert out["cls"] == "mic"
+
+
+def test_voice_section_has_no_send_path_and_no_alert(client: Client) -> None:
+    section = _voice_section(client)
+    for banned in (".click()", "fetch", "sendAnswer", "alert(", "sessionStorage"):
+        assert banned not in section, banned
+    assert not re.search(r"\bact\(", section)
+    assert not re.search(r"\b(document|window)\.", section)
+    assert "Chrome sends audio to Google for recognition" in section
+
+
+def test_app_js_wires_micfor_into_the_three_boxes(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    outside = text.split(VOICE_BEGIN)[0] + text.split(VOICE_END)[1]
+    # one deps-building helper (micOf) calls micFor; each of the three boxes calls the helper
+    assert len(re.findall(r"\bmicFor\(", outside)) == 1
+    assert len(re.findall(r"\bmicOf\(", outside)) == 3
+    for box_id in ("say-area", "answer-area", "new-area"):
+        assert box_id in outside
+    # every send path settles a recording box before it reads the field
+    assert len(re.findall(r"voiceSettle\(", outside)) == 3
+    assert "voiceStopIn(" in outside
+    assert "alert(" not in text
+
+
+def test_app_js_stops_voice_before_replacing_the_reply_box(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    outside = text.split(VOICE_BEGIN)[0] + text.split(VOICE_END)[1]
+    hits = [m.start() for m in re.finditer(r"replyBox\.replaceChildren", outside)]
+    assert hits
+    for pos in hits:
+        assert "voiceStopIn(replyBox)" in outside[max(0, pos - 400) : pos]
+
+
+def test_app_css_styles_the_recording_mic_and_note(client: Client) -> None:
+    _, _, css = client.request("GET", "/app.css")
+    assert b".mic.recording" in css
+    assert b".voice-note" in css
+
+
+def test_voice_keeps_the_csp_unchanged(client: Client) -> None:
+    for path in ("/", "/app.js", "/app.css"):
+        _, headers, _ = client.request("GET", path)
+        assert headers["Content-Security-Policy"] == "default-src 'self'"
