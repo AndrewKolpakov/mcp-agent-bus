@@ -58,11 +58,24 @@ def _my_results(messages: list[MessageEvent], me: str) -> set[str]:
     }
 
 
+def _my_remarks(messages: list[MessageEvent], me: str) -> set[str]:
+    return {
+        m.reply_to
+        for m in messages
+        if m.sender == me and m.kind == "text" and m.reply_to is not None
+    }
+
+
 def thread_status(messages: list[MessageEvent], me: str, acked: set[str]) -> str:
-    """Waiting while a task to me lacks my result, else new while unacked, else answered."""
+    """Open task: waiting if one is untouched, discussed if each has a text reply of mine.
+
+    Without an open task: new while a message to me is unacked, else answered.
+    """
     answered = _my_results(messages, me)
-    if any(m.to == me and m.kind == "task" and m.id not in answered for m in messages):
-        return "waiting"
+    open_tasks = [m for m in messages if m.to == me and m.kind == "task" and m.id not in answered]
+    if open_tasks:
+        remarks = _my_remarks(messages, me)
+        return "waiting" if any(m.id not in remarks for m in open_tasks) else "discussed"
     if any(m.to == me and m.id not in acked for m in messages):
         return "new"
     return "answered"
@@ -499,6 +512,12 @@ h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
 .badge { font-size: .75rem; border-radius: 9px; padding: 0 .5rem; background: #e5e5e0; }
 .badge.waiting { background: #fde7c3; }
 .badge.new { background: #cfe0ff; }
+.badge.discussed { background: #e3d5f7; }
+.filters { position: sticky; top: 0; z-index: 1; display: flex; gap: .3rem; flex-wrap: wrap;
+  padding: .2rem 0 .4rem; background: #f6f6f4; }
+.filters button { padding: .15rem .6rem; border-radius: 9px; border: 1px solid #c8c8c2;
+  background: #fff; font-size: .85rem; }
+.filters button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
 .unread-count { font-size: .75rem; font-weight: 700; color: #fff; background: #2563eb;
   border-radius: 9px; padding: 0 .4rem; margin-left: .3rem; }
 .msgs { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
@@ -531,14 +550,46 @@ APP_JS = """\
 (() => {
   const csrf = document.querySelector('meta[name="csrf"]').content;
   const root = document.getElementById('app');
-  const state = {
-    data: null, view: null, selected: null, error: '',
-    choice: '', choiceFor: null, say: '', newBody: '',
-    answerText: '', pending: null, sending: null,
-  };
   // A Да/Нет answer is sent only after this many seconds without a cancel.
   const COUNTDOWN_SECONDS = 5;
-  const statusText = { waiting: 'ждёт ответа', new: 'новое', answered: 'отвечено' };
+  const CLOSE_BODY = 'закрыт без ответа';
+  const statusText = {
+    waiting: 'ждёт ответа', discussed: 'обсуждается', new: 'новое', answered: 'отвечено',
+  };
+  // The list shows these statuses until a filter button is pressed ('' is that default).
+  const DEFAULT_VIEW = ['waiting', 'new', 'discussed'];
+  // [key, label, statuses it shows; null shows everything]
+  const FILTERS = [
+    ['waiting', 'ждут ответа', ['waiting', 'discussed']],
+    ['new', 'новые', ['new']],
+    ['all', 'все', null],
+  ];
+
+  // Drafts and the filter live in sessionStorage; a blocked or full storage only means
+  // they are not remembered.
+  const draftGet = (key) => {
+    try { return sessionStorage.getItem(key) || ''; } catch (e) { return ''; }
+  };
+  const draftPut = (key, value) => {
+    try {
+      if (value) sessionStorage.setItem(key, value);
+      else sessionStorage.removeItem(key);
+    } catch (e) { /* storage unavailable */ }
+  };
+  const draftDrop = (key) => {
+    try { sessionStorage.removeItem(key); } catch (e) { /* storage unavailable */ }
+  };
+  const storedFilter = () => {
+    const key = draftGet('filter');
+    return FILTERS.some((f) => f[0] === key) ? key : '';
+  };
+
+  const state = {
+    data: null, view: null, selected: null, error: '',
+    choice: '', choiceFor: null, say: '', newBody: draftGet('compose'),
+    answerText: '', pending: null, sending: null, filter: storedFilter(),
+    shownThread: null, msgsSig: '', msgsThread: null, replyKey: '', backendKey: '',
+  };
 
   const el = (tag, attrs, ...children) => {
     const node = document.createElement(tag);
@@ -585,7 +636,11 @@ APP_JS = """\
   const openThread = async (thread) => {
     try {
       const view = await call('/api/thread', { thread: thread });
-      if (state.selected !== thread) { state.choice = ''; state.say = ''; stopCountdown(); }
+      if (state.selected !== thread) {
+        state.choice = '';
+        state.say = draftGet('draft:' + thread);
+        stopCountdown();
+      }
       state.selected = thread;
       state.view = view;
       state.error = '';
@@ -595,22 +650,38 @@ APP_JS = """\
     await load();
   };
 
-  const load = async () => {
+  const fetchList = async () => {
     try {
       state.data = await call('/api/threads');
       state.error = '';
     } catch (e) {
       state.error = String(e.message || e);
     }
+  };
+
+  // An explicit action (open, send, answer): fetch the list and rebuild everything,
+  // the reply area included.
+  const load = async () => {
+    await fetchList();
     render();
+  };
+
+  // A poll tick never touches the reply area, the compose box or a text field: it
+  // refreshes the thread list, the message list and the badges and hints only.
+  const refreshList = async () => {
+    await fetchList();
+    updateChrome();
+    updateList();
+    if (state.view) updateHead(state.view);
   };
 
   // One tick: list, then (only when a thread is open) that thread's view, which acks
   // its new messages because they are on screen; the list is read again so the open
-  // thread's badge shows the ack. A failed thread call keeps the old view.
+  // thread's badge shows the ack. A failed thread call keeps the old view. The reply
+  // area is rebuilt only when the open task or the answered state changed.
   const poll = async () => {
     const thread = state.selected;
-    await load();
+    await refreshList();
     if (!thread || state.selected !== thread) return;
     try {
       const view = await call('/api/thread', { thread: thread });
@@ -620,10 +691,22 @@ APP_JS = """\
       if (!view.open_task) stopCountdown();
     } catch (e) {
       state.error = String(e.message || e);
-      render();
+      showError();
       return;
     }
-    await load();
+    updateDetail(false);
+    await refreshList();
+  };
+
+  const visibleStatuses = () => {
+    const entry = FILTERS.find((f) => f[0] === state.filter);
+    return entry ? entry[2] : DEFAULT_VIEW;
+  };
+
+  const setFilter = (key) => {
+    state.filter = state.filter === key ? '' : key;
+    draftPut('filter', state.filter);
+    updateList();
   };
 
   const threadRow = (t) => {
@@ -691,7 +774,7 @@ APP_JS = """\
     if (!body || state.sending) return;
     state.sending = taskId;
     act('/api/reply', { msg_id: taskId, kind: 'result', body: body },
-      () => { state.choice = ''; state.answerText = ''; });
+      () => { state.choice = ''; state.answerText = ''; draftDrop('answer:' + taskId); });
     render();
   };
 
@@ -716,10 +799,13 @@ APP_JS = """\
     if (view.open_task) {
       const taskId = view.open_task.id;
       if (state.pending && state.pending.taskId !== taskId) stopCountdown();
-      if (state.choiceFor !== taskId) state.answerText = '';
+      const firstLook = state.choiceFor !== taskId;
+      if (firstLook) state.answerText = draftGet('answer:' + taskId);
       // A choice belongs to the task it was made for: when a newer task becomes the open
       // one, the radios start empty, so one click never answers a task not yet read.
       if (state.choiceFor !== taskId) { state.choice = ''; state.choiceFor = taskId; }
+      // A saved text answer reopens its box after a reload.
+      if (firstLook && state.answerText) state.choice = 'text';
       const box = el('div', {});
       if (state.sending === taskId) {
         box.append(el('div', { class: 'meta' }, 'Отправка…'));
@@ -743,6 +829,11 @@ APP_JS = """\
         });
         choices.append(el('label', {}, radio, label));
       }
+      // Closes the question at once, with no countdown: a result that says nothing was decided.
+      const close = el('button', {}, 'Закрыть вопрос');
+      close.disabled = !!state.pending;
+      close.addEventListener('click', () => sendAnswer(taskId, CLOSE_BODY));
+      choices.append(close);
       box.append(choices);
       if (state.pending) {
         const cancel = el('button', {}, 'Отменить');
@@ -758,6 +849,7 @@ APP_JS = """\
         submit.disabled = !state.answerText.trim();
         field.addEventListener('input', () => {
           state.answerText = field.value;
+          draftPut('answer:' + taskId, field.value);
           submit.disabled = !field.value.trim();
         });
         submit.addEventListener('click', () => sendAnswer(taskId, field.value.trim()));
@@ -772,109 +864,177 @@ APP_JS = """\
     return null;
   };
 
-  const detail = (view) => {
-    const pane = el('div', { class: 'detail' });
-    if (!view) {
-      pane.append(el('div', { class: 'detail-empty' }, 'Выберите ветку слева.'));
-      return pane;
-    }
-    const row = ((state.data && state.data.threads) || [])
-      .find((t) => t.thread === state.selected);
-    const head = el('div', { class: 'detail-head' },
-      el('div', { class: 'detail-title' }, (row && row.title) || '(без текста)'),
-      el('div', { class: 'meta' }, 'Ветка: ' + view.counterpart));
-    pane.append(head);
-    const list = el('div', { class: 'msgs', id: 'msgs' });
-    for (const m of view.messages) list.append(message(m));
-    pane.append(list);
-    const reply = el('div', { class: 'reply' });
+  // The reply area is rebuilt only when this key changes (another thread, another open
+  // task, an answered state, another say target) or when an action forces it, so a poll
+  // tick never replaces a text field that may hold the caret.
+  const replyKeyOf = (view) => {
+    const answer = view.open_task ? 'open:' + view.open_task.id
+      : view.answered_task ? 'done:' + view.answered_task.id + ':' + view.answered_task.answer
+      : 'none';
+    const target = view.open_task ? '' : view.say.mode + ':' + (view.say.hint || '');
+    return view.thread + '|' + answer + '|' + target;
+  };
+
+  const updateReply = (view, force) => {
+    const key = replyKeyOf(view);
+    if (!force && key === state.replyKey) return;
+    state.replyKey = key;
+    replyBox.replaceChildren();
     const box = answerBox(view);
-    if (box) reply.append(box);
+    if (box) replyBox.append(box);
     // One control per state: while a task is open its answer control is the only input;
     // the thread's own box returns once the task is answered.
     if (!view.open_task) {
-      if (view.say.mode === 'new') reply.append(el('div', { class: 'meta' }, view.say.hint));
+      if (view.say.mode === 'new') replyBox.append(el('div', { class: 'meta' }, view.say.hint));
       const area = el('textarea', {
         placeholder: 'Сообщение для ' + view.counterpart, id: 'say-area', rows: 3,
       });
       area.value = state.say;
-      area.addEventListener('input', () => { state.say = area.value; });
+      area.addEventListener('input', () => {
+        state.say = area.value;
+        draftPut('draft:' + view.thread, area.value);
+      });
       const send = el('button', {}, 'Отправить');
       send.addEventListener('click', () => act(
-        '/api/say', { thread: view.thread, body: area.value }, () => { state.say = ''; },
+        '/api/say', { thread: view.thread, body: area.value },
+        () => { state.say = ''; draftDrop('draft:' + view.thread); },
       ));
       bindSend(area, send);
-      reply.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
-    }
-    pane.append(reply);
-    return pane;
-  };
-
-  const render = () => {
-    // The drafts and the radio choice live in state, so a rebuild loses only the DOM
-    // position: capture the scroll offsets and the caret first, put them back after.
-    const msgs = document.getElementById('msgs');
-    const pageTop = window.scrollY;
-    const paneTop = msgs ? msgs.scrollTop : 0;
-    const nearBottom = !msgs || (msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 24);
-    const sameThread = state.shownThread === state.selected;
-    const active = document.activeElement;
-    const focus = active && active.tagName === 'TEXTAREA' && active.id
-      ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
-      : null;
-    draw();
-    state.shownThread = state.selected;
-    const fresh = document.getElementById('msgs');
-    if (fresh) {
-      fresh.scrollTop = (nearBottom || !sameThread) ? fresh.scrollHeight : paneTop;
-    }
-    window.scrollTo(0, pageTop);
-    if (focus) {
-      const area = document.getElementById(focus.id);
-      if (area) {
-        area.focus({ preventScroll: true });
-        area.setSelectionRange(focus.start, focus.end);
-      }
+      replyBox.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
     }
   };
 
-  const draw = () => {
+  const updateHead = (view) => {
+    const row = ((state.data && state.data.threads) || [])
+      .find((t) => t.thread === state.selected);
+    headTitle.textContent = (row && row.title) || '(без текста)';
+    headSub.textContent = 'Ветка: ' + view.counterpart;
+  };
+
+  // The message list is replaced only when its messages changed; the scroll position
+  // stays unless the owner was at the bottom or the thread is a different one.
+  const updateMsgs = (view) => {
+    const sig = view.messages.map((m) => m.id).join(',');
+    if (sig === state.msgsSig && view.thread === state.msgsThread) return;
+    const sameThread = view.thread === state.msgsThread;
+    const top = msgsBox.scrollTop;
+    const nearBottom = msgsBox.scrollHeight - msgsBox.scrollTop - msgsBox.clientHeight < 24;
+    msgsBox.replaceChildren();
+    for (const m of view.messages) msgsBox.append(message(m));
+    msgsBox.scrollTop = (nearBottom || !sameThread) ? msgsBox.scrollHeight : top;
+    state.msgsSig = sig;
+    state.msgsThread = view.thread;
+  };
+
+  const updateDetail = (force) => {
+    const view = state.view;
+    if (!view) {
+      if (detailPane.firstChild !== detailEmpty) detailPane.replaceChildren(detailEmpty);
+      state.shownThread = null;
+      return;
+    }
+    if (state.shownThread !== state.selected) {
+      detailPane.replaceChildren(headBox, msgsBox, replyBox);
+      state.shownThread = state.selected;
+      state.replyKey = '';
+    }
+    updateHead(view);
+    updateMsgs(view);
+    updateReply(view, force);
+  };
+
+  const showError = () => { errorBox.textContent = state.error; };
+
+  const updateChrome = () => {
     const data = state.data;
-    root.replaceChildren();
-    root.append(el('h1', {}, data ? 'agent-bus: ' + data.me : 'agent-bus'));
-    if (data && data.backend) {
-      if (data.backend.mode === 'hub') {
-        root.append(el('div', { class: 'hub' }, 'hub: ' + data.backend.hub));
-      } else {
-        root.append(el('div', { class: 'banner-local' },
-          "LOCAL bus — not connected to a hub. Messages stay on this machine. "
-            + "Set AGENT_BUS_HUB (or the plugin's hub_url) and restart."));
-      }
-    }
-    const err = el('div', { class: 'error', id: 'error' }, state.error);
-    root.append(err);
+    title.textContent = data ? 'agent-bus: ' + data.me : 'agent-bus';
+    showError();
+    panes.style.display = data ? '' : 'none';
     if (!data) return;
-
-    const area = el('textarea', {
-      placeholder: 'Новое сообщение для ' + data.peer, id: 'new-area',
-    });
-    area.value = state.newBody;
-    area.addEventListener('input', () => { state.newBody = area.value; });
-    const send = el('button', {}, 'Отправить');
-    send.addEventListener('click', () => act(
-      '/api/send', { body: area.value }, () => { state.newBody = ''; },
-    ));
-    bindSend(area, send);
-    const compose = el('div', { class: 'card' },
-      el('div', { class: 'meta' }, 'Написать ' + data.peer),
-      area, el('div', { class: 'row' }, send));
-
-    const list = el('div', { class: 'list' });
-    if (!data.threads.length) list.append(el('div', { class: 'meta' }, 'Нет веток.'));
-    for (const t of data.threads) list.append(threadRow(t));
-    list.append(compose);
-    root.append(el('div', { class: 'panes' }, list, detail(state.view)));
+    composeLabel.textContent = 'Написать ' + data.peer;
+    composeArea.placeholder = 'Новое сообщение для ' + data.peer;
+    const backend = data.backend;
+    const key = backend ? backend.mode + ':' + (backend.hub || '') : '';
+    if (key === state.backendKey) return;
+    state.backendKey = key;
+    backendBox.replaceChildren();
+    if (!backend) return;
+    if (backend.mode === 'hub') {
+      backendBox.append(el('div', { class: 'hub' }, 'hub: ' + backend.hub));
+    } else {
+      backendBox.append(el('div', { class: 'banner-local' },
+        "LOCAL bus — not connected to a hub. Messages stay on this machine. "
+          + "Set AGENT_BUS_HUB (or the plugin's hub_url) and restart."));
+    }
   };
+
+  const updateList = () => {
+    const data = state.data;
+    if (!data) return;
+    const count = (statuses) => data.threads
+      .filter((t) => !statuses || statuses.includes(t.status)).length;
+    for (const [key, label, statuses] of FILTERS) {
+      const button = filterButtons[key];
+      button.textContent = label + ' ' + count(statuses);
+      button.className = state.filter === key ? 'active' : '';
+    }
+    const shown = visibleStatuses();
+    const rows = data.threads.filter((t) => !shown || shown.includes(t.status));
+    threadsBox.replaceChildren();
+    if (!rows.length) threadsBox.append(el('div', { class: 'meta' }, 'Нет веток.'));
+    for (const t of rows) threadsBox.append(threadRow(t));
+  };
+
+  // An explicit action: bring every part up to date, the reply area included.
+  const render = () => {
+    updateChrome();
+    updateList();
+    updateDetail(true);
+  };
+
+  // The page skeleton is built once; later updates change only text and the children of
+  // #threads, #msgs and the reply area, so the compose box is never replaced.
+  const title = el('h1', {}, 'agent-bus');
+  const backendBox = el('div', {});
+  const errorBox = el('div', { class: 'error', id: 'error' }, '');
+
+  const composeLabel = el('div', { class: 'meta' }, 'Написать');
+  const composeArea = el('textarea', { placeholder: 'Новое сообщение', id: 'new-area' });
+  composeArea.value = state.newBody;
+  composeArea.addEventListener('input', () => {
+    state.newBody = composeArea.value;
+    draftPut('compose', composeArea.value);
+  });
+  const composeSend = el('button', {}, 'Отправить');
+  composeSend.addEventListener('click', () => act(
+    '/api/send', { body: composeArea.value },
+    () => { state.newBody = ''; composeArea.value = ''; draftDrop('compose'); },
+  ));
+  bindSend(composeArea, composeSend);
+  const composeCard = el('div', { class: 'card' },
+    composeLabel, composeArea, el('div', { class: 'row' }, composeSend));
+
+  const filterButtons = {};
+  const filterBar = el('div', { class: 'filters' });
+  for (const [key, label] of FILTERS) {
+    const button = el('button', { type: 'button' }, label);
+    button.addEventListener('click', () => setFilter(key));
+    filterButtons[key] = button;
+    filterBar.append(button);
+  }
+  const threadsBox = el('div', { id: 'threads' });
+  const listPane = el('div', { class: 'list' }, filterBar, threadsBox, composeCard);
+
+  const detailEmpty = el('div', { class: 'detail-empty' }, 'Выберите ветку слева.');
+  const headTitle = el('div', { class: 'detail-title' }, '');
+  const headSub = el('div', { class: 'meta' }, '');
+  const headBox = el('div', { class: 'detail-head' }, headTitle, headSub);
+  const msgsBox = el('div', { class: 'msgs', id: 'msgs' });
+  const replyBox = el('div', { class: 'reply' });
+  const detailPane = el('div', { class: 'detail', id: 'detail' }, detailEmpty);
+  const panes = el('div', { class: 'panes' }, listPane, detailPane);
+  panes.style.display = 'none';
+  root.append(title, backendBox, errorBox, panes);
 
   load();
   setInterval(poll, 10000);

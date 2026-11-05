@@ -508,7 +508,7 @@ def test_app_js_poll_refreshes_the_open_thread_only(client: Client) -> None:
     assert "const thread = state.selected;" in poll
     assert "if (!thread || state.selected !== thread) return;" in poll
     assert poll.count("'/api/thread'") == 1
-    assert poll.index("await load()") < poll.index("'/api/thread'")
+    assert poll.index("await refreshList()") < poll.index("'/api/thread'")
     assert "openThread" not in poll
     assert "state.selected =" not in poll
     # a failed thread call shows the error and keeps the old view
@@ -519,24 +519,115 @@ def test_app_js_poll_refreshes_the_open_thread_only(client: Client) -> None:
     assert "if (!view.open_task) state.choice = '';" in poll
 
 
-def test_app_js_render_keeps_scroll_drafts_and_focus_across_a_refresh(client: Client) -> None:
+def test_app_js_poll_never_rebuilds_the_reply_area_or_a_focused_field(client: Client) -> None:
     _, _, js = client.request("GET", "/app.js")
     text = js.decode()
+    poll = _js_function(text, "poll")
+    # a tick updates the list and the message list; the full render is for actions only
+    assert "refreshList()" in poll
+    assert "updateDetail(false)" in poll
+    assert "updateDetail(true)" not in poll
+    assert "render(" not in poll
+    for forbidden in ("say-area", "answer-area", "new-area", "replaceChildren", "focus("):
+        assert forbidden not in poll, forbidden
+    refresh = _js_function(text, "refreshList")
+    for part in ("updateChrome()", "updateList()", "updateHead("):
+        assert part in refresh
+    for forbidden in ("updateReply", "updateDetail", "render(", "say-area", "answer-area"):
+        assert forbidden not in refresh, forbidden
+    # the reply area is rebuilt only on a changed key or a forced update
+    reply = _js_function(text, "updateReply")
+    assert "if (!force && key === state.replyKey) return;" in reply
+    detail = _js_function(text, "updateDetail")
+    assert "updateReply(view, force)" in detail
+    assert "updateMsgs(view)" in detail
     render = _js_function(text, "render")
-    assert "scrollTop" in render
-    assert "scrollHeight - msgs.scrollTop - msgs.clientHeight" in render
-    assert "nearBottom" in render
-    assert "window.scrollTo(0, pageTop)" in render
-    assert "selectionStart" in render
-    assert "selectionEnd" in render
-    assert "setSelectionRange(focus.start, focus.end)" in render
-    assert "area.focus(" in render
+    assert "updateDetail(true)" in render
+    # the compose box and the page skeleton are built once, outside every updater
+    assert text.count("id: 'new-area'") == 1
+    for name in ("updateChrome", "updateList", "updateMsgs", "updateHead", "updateDetail"):
+        assert "new-area" not in _js_function(text, name), name
+    # the message list keeps its scroll unless the owner was at the bottom
+    msgs = _js_function(text, "updateMsgs")
+    assert "msgsBox.scrollHeight - msgsBox.scrollTop - msgsBox.clientHeight" in msgs
+    assert "nearBottom" in msgs
+    assert "if (sig === state.msgsSig && view.thread === state.msgsThread) return;" in msgs
     # the drafts are state, re-applied on every rebuild
     assert "area.value = state.say;" in text
-    assert "area.value = state.newBody;" in text
+    assert "composeArea.value = state.newBody;" in text
     assert "radio.checked = state.choice === value;" in text
-    # nothing skips a refresh because a textarea has focus any more
     assert "typing" not in text
+    assert text.count("setInterval(") == 2  # the poll and the countdown
+
+
+def test_app_js_filter_buttons_count_and_remember_the_choice(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert "['waiting', 'ждут ответа', ['waiting', 'discussed']]" in text
+    assert "['new', 'новые', ['new']]" in text
+    assert "['all', 'все', null]" in text
+    assert "const DEFAULT_VIEW = ['waiting', 'new', 'discussed'];" in text
+    visible = _js_function(text, "visibleStatuses")
+    assert "DEFAULT_VIEW" in visible
+    listing = _js_function(text, "updateList")
+    assert "label + ' ' + count(statuses)" in listing
+    assert "shown.includes(t.status)" in listing
+    # a second press of the active button returns to the default view
+    setter = _js_function(text, "setFilter")
+    assert "state.filter === key ? '' : key" in setter
+    assert "draftPut('filter', state.filter)" in setter
+    assert "draftGet('filter')" in _js_function(text, "storedFilter")
+    assert "filter: storedFilter()" in text
+    _, _, css = client.request("GET", "/app.css")
+    assert b".filters button.active" in css
+    assert b".badge.discussed" in css
+
+
+def test_app_js_status_text_has_the_discussed_badge(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert "discussed: 'обсуждается'" in text
+
+
+def test_app_js_drafts_live_in_session_storage_per_thread_and_clear_on_send(
+    client: Client,
+) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    for helper, call in (
+        ("draftGet", "sessionStorage.getItem(key)"),
+        ("draftPut", "sessionStorage.setItem(key, value)"),
+        ("draftDrop", "sessionStorage.removeItem(key)"),
+    ):
+        body = _js_function(text, helper)
+        assert call in body
+        assert "try {" in body
+        assert "catch (e)" in body
+    # the thread box, the text answer and the compose box each have their own key
+    reply = _js_function(text, "updateReply")
+    assert "draftPut('draft:' + view.thread, area.value)" in reply
+    assert "draftDrop('draft:' + view.thread)" in reply
+    assert "state.say = draftGet('draft:' + thread);" in _js_function(text, "openThread")
+    answer = _js_function(text, "answerBox")
+    assert "draftGet('answer:' + taskId)" in answer
+    assert "draftPut('answer:' + taskId, field.value)" in answer
+    assert "draftDrop('answer:' + taskId)" in _js_function(text, "sendAnswer")
+    assert "draftPut('compose', composeArea.value)" in text
+    assert "draftDrop('compose')" in text
+    assert "newBody: draftGet('compose')" in text
+
+
+def test_app_js_close_question_posts_a_result_at_once(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert "const CLOSE_BODY = 'закрыт без ответа';" in text
+    box = _js_function(text, "answerBox")
+    assert "'Закрыть вопрос'" in box
+    assert "sendAnswer(taskId, CLOSE_BODY)" in box
+    assert "confirm(" not in text
+    send = _js_function(text, "sendAnswer")
+    assert "kind: 'result'" in send
+    assert "msg_id: taskId" in send
 
 
 def test_app_js_a_radio_choice_never_carries_to_a_newer_open_task(client: Client) -> None:
@@ -627,7 +718,10 @@ def test_app_js_cmd_or_ctrl_enter_sends_from_every_textarea(client: Client) -> N
     assert "preventDefault()" in bind
     textareas = text.count("el('textarea'")
     assert textareas == 3
-    assert text.count("bindSend(area, send);") + text.count("bindSend(field, submit);") == textareas
+    assert text.count("bindSend(") == textareas
+    assert "bindSend(area, send);" in text
+    assert "bindSend(field, submit);" in text
+    assert "bindSend(composeArea, composeSend);" in text
 
 
 def test_a_text_result_to_a_task_is_accepted_and_closes_the_question(
@@ -725,11 +819,12 @@ def test_app_js_shows_a_short_local_time_and_the_kind_only_when_not_text(client:
 
 def test_app_js_reply_area_follows_msgs_inside_the_thread_pane(client: Client) -> None:
     _, _, js = client.request("GET", "/app.js")
-    detail = _js_function(js.decode(), "detail")
-    assert detail.index("id: 'msgs'") < detail.index("class: 'reply'")
-    assert detail.index("pane.append(list)") < detail.index("pane.append(reply)")
-    assert "pane.append(reply)" in detail
-    assert "reply.append(el('div', { class: 'row' }, area)" in detail
+    text = js.decode()
+    detail = _js_function(text, "updateDetail")
+    assert "detailPane.replaceChildren(headBox, msgsBox, replyBox)" in detail
+    assert text.index("const msgsBox = el(") < text.index("const replyBox = el(")
+    reply = _js_function(text, "updateReply")
+    assert "replyBox.append(el('div', { class: 'row' }, area)" in reply
     assert "innerHTML" not in detail
 
 
@@ -737,7 +832,7 @@ def test_app_js_hides_the_thread_box_while_a_task_is_open(client: Client) -> Non
     # One control per state: an open task is answered only through its own control; the
     # thread's box (and its hint) is built only when no task is open.
     _, _, js = client.request("GET", "/app.js")
-    detail = _js_function(js.decode(), "detail")
+    detail = _js_function(js.decode(), "updateReply")
     guard = detail.index("if (!view.open_task) {")
     assert guard < detail.index("id: 'say-area'")
     assert guard < detail.index("view.say.hint")
@@ -875,10 +970,61 @@ def test_status_waiting_for_a_task_without_my_result(client: Client, personal: B
     assert row["unread"] == 1
 
 
-def test_a_text_reply_does_not_clear_waiting(client: Client, owner: Bus, personal: Bus) -> None:
+def test_a_text_reply_makes_a_task_discussed_not_answered(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
     task = personal.send("owner", "please decide", kind="task")
+    untouched = personal.send("owner", "another one", kind="task")
     owner.send("personal", "one question first", kind="text", reply_to=task.id)
-    assert thread_row(client, task.thread)["status"] == "waiting"
+    assert thread_row(client, task.thread)["status"] == "discussed"
+    assert thread_row(client, untouched.thread)["status"] == "waiting"
+    view = open_thread(client, task.thread)
+    assert view["open_task"] == {"id": task.id}
+    assert thread_row(client, task.thread)["status"] == "discussed"
+
+
+def test_discussed_needs_every_open_task_to_have_a_remark(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    first = personal.send("owner", "one", kind="task")
+    owner.send("personal", "remark", kind="text", reply_to=first.id)
+    second = personal.send("owner", "two", kind="task", reply_to=first.id)
+    assert thread_row(client, first.thread)["status"] == "waiting"
+    owner.send("personal", "remark two", kind="text", reply_to=second.id)
+    assert thread_row(client, first.thread)["status"] == "discussed"
+
+
+def test_closing_a_question_without_an_answer_answers_it(
+    client: Client, owner: Bus, personal: Bus
+) -> None:
+    task = personal.send("owner", "decide?", kind="task")
+    owner.send("personal", "a remark", kind="text", reply_to=task.id)
+    assert thread_row(client, task.thread)["status"] == "discussed"
+    status, _ = client.post(
+        "/api/reply", {"msg_id": task.id, "kind": "result", "body": "закрыт без ответа"}
+    )
+    assert status == 200
+    open_thread(client, task.thread)
+    row = thread_row(client, task.thread)
+    assert (row["status"], row["unread"]) == ("answered", 0)
+    view = open_thread(client, task.thread)
+    assert view["answered_task"] == {"id": task.id, "answer": "закрыт без ответа"}
+    status, data = client.post(
+        "/api/reply", {"msg_id": task.id, "kind": "result", "body": "закрыт без ответа"}
+    )
+    assert (status, data) == (409, {"error": "already answered"})
+
+
+def test_pure_status_discussed_untouched_and_closed(owner: Bus, personal: Bus) -> None:
+    task = personal.send("owner", "decide?", kind="task")
+    messages = owner.history(thread=task.thread, last=None)
+    assert web.thread_status(messages, "owner", set()) == "waiting"
+    owner.send("personal", "hm", kind="text", reply_to=task.id)
+    messages = owner.history(thread=task.thread, last=None)
+    assert web.thread_status(messages, "owner", set()) == "discussed"
+    owner.send("personal", "закрыт без ответа", kind="result", reply_to=task.id)
+    messages = owner.history(thread=task.thread, last=None)
+    assert web.thread_status(messages, "owner", {task.id}) == "answered"
 
 
 def test_opening_a_thread_acks_but_a_task_stays_waiting(client: Client, personal: Bus) -> None:
