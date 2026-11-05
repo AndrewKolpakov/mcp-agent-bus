@@ -524,6 +524,7 @@ textarea { width: 100%; min-height: 3.5rem; font: inherit; box-sizing: border-bo
 .hub { color: #555; font-size: .85rem; margin: 0 0 .5rem; }
 .error { color: #b00020; margin: .4rem 0; white-space: pre-wrap; }
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
+.row label { display: inline-flex; align-items: center; gap: .25rem; margin-right: .6rem; }
 """
 
 APP_JS = """\
@@ -533,7 +534,10 @@ APP_JS = """\
   const state = {
     data: null, view: null, selected: null, error: '',
     choice: '', choiceFor: null, say: '', newBody: '',
+    answerText: '', pending: null, sending: null,
   };
+  // A Да/Нет answer is sent only after this many seconds without a cancel.
+  const COUNTDOWN_SECONDS = 5;
   const statusText = { waiting: 'ждёт ответа', new: 'новое', answered: 'отвечено' };
 
   const el = (tag, attrs, ...children) => {
@@ -567,10 +571,12 @@ APP_JS = """\
     try {
       const result = await call(path, payload);
       state.error = '';
+      state.sending = null;
       if (done) done(result);
       if (state.selected) await openThread(state.selected);
       else await load();
     } catch (e) {
+      state.sending = null;
       state.error = String(e.message || e);
       render();
     }
@@ -579,7 +585,7 @@ APP_JS = """\
   const openThread = async (thread) => {
     try {
       const view = await call('/api/thread', { thread: thread });
-      if (state.selected !== thread) { state.choice = ''; state.say = ''; }
+      if (state.selected !== thread) { state.choice = ''; state.say = ''; stopCountdown(); }
       state.selected = thread;
       state.view = view;
       state.error = '';
@@ -611,6 +617,7 @@ APP_JS = """\
       if (state.selected !== thread) return;
       state.view = view;
       if (!view.open_task) state.choice = '';
+      if (!view.open_task) stopCountdown();
     } catch (e) {
       state.error = String(e.message || e);
       render();
@@ -656,32 +663,108 @@ APP_JS = """\
     return node;
   };
 
+  // Cmd+Enter (Ctrl+Enter elsewhere) in a text box does what clicking its button does.
+  const bindSend = (field, button) => {
+    field.addEventListener('keydown', (ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+        ev.preventDefault();
+        button.click();
+      }
+    });
+  };
+
+  // The Да/Нет countdown lives in state.pending, keyed by its task id, so a render or a
+  // poll never restarts it; it ends by sending once or by a cancel that sends nothing.
+  const stopCountdown = () => {
+    if (state.pending) clearInterval(state.pending.timer);
+    state.pending = null;
+  };
+
+  const cancelCountdown = () => {
+    clearInterval(state.pending && state.pending.timer);
+    state.pending = null;
+    state.choice = '';
+    render();
+  };
+
+  const sendAnswer = (taskId, body) => {
+    if (!body || state.sending) return;
+    state.sending = taskId;
+    act('/api/reply', { msg_id: taskId, kind: 'result', body: body },
+      () => { state.choice = ''; state.answerText = ''; });
+    render();
+  };
+
+  const tickCountdown = (pending) => {
+    if (state.pending !== pending) { clearInterval(pending.timer); return; }
+    pending.left -= 1;
+    if (pending.left > 0) { render(); return; }
+    stopCountdown();
+    state.choice = '';
+    sendAnswer(pending.taskId, pending.value);
+  };
+
+  const startCountdown = (taskId, value) => {
+    if (state.pending || state.sending) return;
+    const pending = { taskId: taskId, value: value, left: COUNTDOWN_SECONDS, timer: null };
+    pending.timer = setInterval(() => tickCountdown(pending), 1000);
+    state.pending = pending;
+    render();
+  };
+
   const answerBox = (view) => {
     if (view.open_task) {
       const taskId = view.open_task.id;
+      if (state.pending && state.pending.taskId !== taskId) stopCountdown();
+      if (state.choiceFor !== taskId) state.answerText = '';
       // A choice belongs to the task it was made for: when a newer task becomes the open
       // one, the radios start empty, so one click never answers a task not yet read.
       if (state.choiceFor !== taskId) { state.choice = ''; state.choiceFor = taskId; }
-      const answer = el('button', {}, 'Ответить');
-      answer.disabled = !state.choice;
+      const box = el('div', {});
+      if (state.sending === taskId) {
+        box.append(el('div', { class: 'meta' }, 'Отправка…'));
+        return box;
+      }
       const choices = el('div', { class: 'row' });
-      for (const [label, value] of [['Да', 'да'], ['Нет', 'нет']]) {
+      for (const [label, value] of [['Да', 'да'], ['Нет', 'нет'], ['Текст', 'text']]) {
         const radio = el('input', { type: 'radio', name: 'answer-' + taskId, value: value });
         radio.checked = state.choice === value;
+        radio.disabled = !!state.pending;
         radio.addEventListener('change', () => {
           state.choice = value;
           state.choiceFor = taskId;
-          answer.disabled = false;
+          if (value === 'text') {
+            render();
+            const field = document.getElementById('answer-area');
+            if (field) field.focus();
+          } else {
+            startCountdown(taskId, value);
+          }
         });
         choices.append(el('label', {}, radio, label));
       }
-      answer.addEventListener('click', () => act(
-        '/api/reply',
-        { msg_id: taskId, kind: 'result', body: state.choice },
-        () => { state.choice = ''; },
-      ));
-      choices.append(answer);
-      return choices;
+      box.append(choices);
+      if (state.pending) {
+        const cancel = el('button', {}, 'Отменить');
+        cancel.addEventListener('click', cancelCountdown);
+        box.append(el('div', { class: 'row' },
+          el('span', { class: 'meta' }, 'Отправка через ' + state.pending.left + '…'), cancel));
+      } else if (state.choice === 'text') {
+        const field = el('textarea', {
+          placeholder: 'Ответ для ' + view.counterpart, id: 'answer-area', rows: 3,
+        });
+        field.value = state.answerText;
+        const submit = el('button', {}, 'Отправить');
+        submit.disabled = !state.answerText.trim();
+        field.addEventListener('input', () => {
+          state.answerText = field.value;
+          submit.disabled = !field.value.trim();
+        });
+        submit.addEventListener('click', () => sendAnswer(taskId, field.value.trim()));
+        bindSend(field, submit);
+        box.append(el('div', { class: 'row' }, field), el('div', { class: 'row' }, submit));
+      }
+      return box;
     }
     if (view.answered_task) {
       return el('div', { class: 'meta' }, 'Вы ответили: ' + view.answered_task.answer);
@@ -717,6 +800,7 @@ APP_JS = """\
     send.addEventListener('click', () => act(
       '/api/say', { thread: view.thread, body: area.value }, () => { state.say = ''; },
     ));
+    bindSend(area, send);
     reply.append(el('div', { class: 'row' }, area), el('div', { class: 'row' }, send));
     pane.append(reply);
     return pane;
@@ -776,6 +860,7 @@ APP_JS = """\
     send.addEventListener('click', () => act(
       '/api/send', { body: area.value }, () => { state.newBody = ''; },
     ));
+    bindSend(area, send);
     const compose = el('div', { class: 'card' },
       el('div', { class: 'meta' }, 'Написать ' + data.peer),
       area, el('div', { class: 'row' }, send));

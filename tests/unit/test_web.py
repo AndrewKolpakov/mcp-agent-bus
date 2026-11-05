@@ -465,7 +465,8 @@ def test_app_js_is_the_messenger_page(client: Client) -> None:
         "отвечено",
         "Да",
         "Нет",
-        "Ответить",
+        "Текст",
+        "Отменить",
         "Отправить",
         "Вы ответили",
         "Написать",
@@ -547,6 +548,103 @@ def test_app_js_a_radio_choice_never_carries_to_a_newer_open_task(client: Client
     assert reset in box
     assert box.index(reset) < box.index("radio.checked = state.choice === value;")
     assert "state.choiceFor = taskId;" in box.split("addEventListener('change'", 1)[1]
+
+
+def test_app_js_answer_control_is_three_radios_without_an_answer_button(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    box = _js_function(text, "answerBox")
+    assert "[['Да', 'да'], ['Нет', 'нет'], ['Текст', 'text']]" in box
+    assert "type: 'radio'" in box
+    assert "Ответить" not in text
+    assert "innerHTML" not in box
+
+
+def test_app_js_yes_no_starts_a_five_second_countdown_with_a_cancel(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    assert "const COUNTDOWN_SECONDS = 5;" in text
+    start = _js_function(text, "startCountdown")
+    assert "left: COUNTDOWN_SECONDS" in start
+    assert "setInterval(" in start
+    # a second choice or a re-render never starts a second timer
+    assert "if (state.pending || state.sending) return;" in start
+    box = _js_function(text, "answerBox")
+    assert "startCountdown(taskId, value)" in box
+    assert "'Отправка через '" in box
+    assert "'Отменить'" in box
+    # the countdown is keyed by its task id, like the radio choice
+    assert "state.pending.taskId !== taskId" in box
+    assert "taskId: taskId" in start
+
+
+def test_app_js_cancel_clears_the_timer_and_sends_nothing(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    cancel = _js_function(text, "cancelCountdown")
+    assert "clearInterval(" in cancel
+    assert "state.pending = null;" in cancel
+    assert "state.choice = '';" in cancel
+    assert "call(" not in cancel
+    assert "act(" not in cancel
+    assert "sendAnswer" not in cancel
+    assert "/api/reply" not in cancel
+    box = _js_function(text, "answerBox")
+    assert "addEventListener('click', cancelCountdown)" in box
+
+
+def test_app_js_countdown_zero_posts_one_result_and_text_posts_the_trimmed_box(
+    client: Client,
+) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    tick = _js_function(text, "tickCountdown")
+    # a tick of a stopped or replaced countdown does nothing; zero sends once
+    assert "if (state.pending !== pending) { clearInterval(pending.timer); return; }" in tick
+    assert "if (pending.left > 0) { render(); return; }" in tick
+    assert tick.index("stopCountdown();") < tick.index("sendAnswer(pending.taskId, pending.value)")
+    send = _js_function(text, "sendAnswer")
+    assert "'/api/reply'" in send
+    assert "kind: 'result'" in send
+    assert "msg_id: taskId" in send
+    assert "if (!body || state.sending) return;" in send
+    # the Текст path posts the trimmed textarea value, and an empty one is not sent
+    box = _js_function(text, "answerBox")
+    assert "sendAnswer(taskId, field.value.trim())" in box
+    assert "submit.disabled = !state.answerText.trim();" in box
+    # the countdown and the text draft live in state, so a re-render keeps them
+    assert "field.value = state.answerText;" in box
+    assert "state.answerText = field.value;" in box
+    assert "if (state.pending)" in box
+
+
+def test_app_js_cmd_or_ctrl_enter_sends_from_every_textarea(client: Client) -> None:
+    _, _, js = client.request("GET", "/app.js")
+    text = js.decode()
+    bind = _js_function(text, "bindSend")
+    assert "(ev.metaKey || ev.ctrlKey) && ev.key === 'Enter'" in bind
+    assert "button.click()" in bind
+    assert "preventDefault()" in bind
+    textareas = text.count("el('textarea'")
+    assert textareas == 3
+    assert text.count("bindSend(area, send);") + text.count("bindSend(field, submit);") == textareas
+
+
+def test_a_text_result_to_a_task_is_accepted_and_closes_the_question(
+    client: Client, personal: Bus
+) -> None:
+    task = personal.send("owner", "which one?", kind="task")
+    status, _ = client.post(
+        "/api/reply", {"msg_id": task.id, "kind": "result", "body": "the blue one"}
+    )
+    assert status == 200
+    (got,) = personal.inbox()
+    assert (got.kind, got.body, got.reply_to) == ("result", "the blue one", task.id)
+    view = open_thread(client, task.thread)
+    assert view["open_task"] is None
+    assert view["answered_task"] == {"id": task.id, "answer": "the blue one"}
+    status, data = client.post("/api/reply", {"msg_id": task.id, "kind": "result", "body": "да"})
+    assert (status, data) == (409, {"error": "already answered"})
 
 
 def test_a_message_after_the_thread_was_opened_is_acked_by_the_next_thread_call(
