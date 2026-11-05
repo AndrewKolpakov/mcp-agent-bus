@@ -90,8 +90,8 @@ def test_a_thread_post_keeps_the_thread_and_has_no_reply_to(hub: Hub) -> None:
     assert follow_up["thread"] == first["id"]
     assert follow_up["id"] != first["id"]
     assert "reply_to" not in follow_up
-    # Both directions, any kind, and nothing was acked.
-    back = send(hub, "bob", "alice", "ok", kind="result", thread=first["id"])
+    # Both directions, task or text, and nothing was acked.
+    back = send(hub, "bob", "alice", "ok", kind="text", thread=first["id"])
     assert back["thread"] == first["id"]
     assert [e["type"] for e in view(hub, "alice")] == ["message"] * 4
     assert [e["id"] for e in view(hub, "bob")][-2:] == [follow_up["id"], back["id"]]
@@ -109,6 +109,17 @@ def test_a_thread_post_on_the_hub_is_the_local_rule(hub: Hub) -> None:
         422,
         "the recipient of a thread message must be the thread's other participant",
     )
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_a_thread_post_of_a_result_or_a_handoff_is_a_422(hub: Hub, kind: str) -> None:
+    first = send(hub, "alice", "bob", kind="task")
+    refused(
+        lambda: send(hub, "bob", "alice", kind=kind, thread=first["id"]),
+        422,
+        "a thread post must be kind task or text; a result answers with reply_to",
+    )
+    assert len(view(hub, "alice")) == 1
 
 
 def test_a_thread_post_into_an_unknown_thread_is_a_404(hub: Hub) -> None:
@@ -168,7 +179,8 @@ def test_a_thread_post_keeps_the_rate_limit_and_the_team_check(hub: Hub) -> None
     send(hub, "bob", "alice", thread=first["id"])
     send(hub, "alice", "bob", thread=first["id"])
     refused(lambda: send(hub, "bob", "alice", thread=first["id"]), 429, "kind='await_human'")
-    send(hub, "bob", "alice", kind="await_human", thread=first["id"])
+    # The hand-off is not a thread post; it is the way past the limit.
+    send(hub, "bob", "alice", kind="await_human")
 
 
 def test_replying_to_someone_elses_message_looks_like_an_unknown_one(hub: Hub) -> None:

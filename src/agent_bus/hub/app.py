@@ -225,7 +225,7 @@ class Hub:
             if wanted is not None and wanted != msg_id:
                 root = self.table.message(wanted) if MESSAGE_ID.fullmatch(wanted) else None
                 try:
-                    check_thread_post(root, wanted, agent, to)
+                    check_thread_post(root, wanted, agent, to, kind)
                 except BusError as exc:
                     if str(exc).startswith(("unknown thread", "not a participant")):
                         # Do not reveal a thread to a non-participant.

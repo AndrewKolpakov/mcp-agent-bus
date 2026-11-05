@@ -23,6 +23,7 @@ from agent_bus.models import (
     MessageHeader,
     check_agent_name,
     check_thread_post,
+    check_thread_post_kind,
     new_id,
     now,
 )
@@ -186,10 +187,8 @@ class Bus:
         if thread is not None and reply_to is not None:
             raise BusError("pass reply_to or thread, not both")
         if thread is not None:
-            # Only a hub-backed store has this; the local store always honours thread.
-            require = getattr(self.store, "require_thread_posts", None)
-            if require is not None:
-                require()
+            check_thread_post_kind(kind)
+            self.store.require_thread_posts()
         try:
             to = check_agent_name(to)
         except ValueError as exc:
@@ -212,7 +211,7 @@ class Bus:
                 raise BusError(f"unknown message id for reply_to: {reply_to}")
             msg_thread = original.thread
         elif thread is not None:
-            check_thread_post(state.messages.get(thread), thread, self.me, to)
+            check_thread_post(state.messages.get(thread), thread, self.me, to, kind)
             msg_thread = thread
         else:
             msg_thread = msg_id

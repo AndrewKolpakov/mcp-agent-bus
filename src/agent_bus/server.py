@@ -134,9 +134,9 @@ anything else. A result usually needs no reply: use it, then ack it right away.
 it with another message; just ack it.
 
 A result or an await_human ends its chain: never answer it with another message. \
-Ack it, and if more work is needed, start it with a new kind="task". The bus refuses \
-replies to results that are not tasks. After a result, if more work is needed, \
-send a new kind="task" with thread=<thread>, not reply_to.
+Ack it; if more work is needed, send a new kind="task" (or kind="text") with \
+thread=<thread>, not reply_to: a thread post takes only those two kinds. The bus \
+refuses replies to results that are not tasks.
 
 To send code or files for review, pass their paths in send's attachments instead of \
 pasting them into the body: the recipient gets exactly those bytes, checked by sha256. \
@@ -246,7 +246,8 @@ TOOLS = [
                     "type": "string",
                     "description": "Post into an existing thread without replying to a "
                     "message (e.g. a follow-up after a result). You must be a participant; "
-                    "to must be the thread's other participant. Not with reply_to.",
+                    "to must be the thread's other participant. Only kind task or text "
+                    "(a result answers with reply_to). Not with reply_to.",
                 },
                 "attachments": {
                     "type": "array",

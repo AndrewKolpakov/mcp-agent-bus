@@ -116,14 +116,28 @@ def test_a_thread_post_lands_in_the_thread_without_replying_or_acking(
     assert [m.id for m in bob.inbox()] == [follow_up.id]
 
 
-def test_a_thread_post_works_in_both_directions_and_any_kind(store: Store) -> None:
+def test_a_thread_post_works_in_both_directions_for_task_and_text(store: Store) -> None:
     alice = Bus(store, "alice", rate_limit=1000)
     bob = Bus(store, "bob", rate_limit=1000)
     root = alice.send("bob", "start", kind="task")
     for sender, to in ((alice, "bob"), (bob, "alice")):
-        for kind in ("task", "text", "result", "await_human"):
+        for kind in ("task", "text"):
             posted = sender.send(to, f"{kind} from {sender.me}", kind=kind, thread=root.thread)  # type: ignore[arg-type]
             assert (posted.thread, posted.reply_to, posted.kind) == (root.thread, None, kind)
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_a_thread_post_of_a_result_or_a_handoff_is_refused(
+    alice: Bus, bob: Bus, kind: str
+) -> None:
+    task = alice.send("bob", "do it", kind="task")
+    count = len(alice.store.read_all().events)
+    with pytest.raises(
+        BusError,
+        match="a thread post must be kind task or text; a result answers with reply_to",
+    ):
+        bob.send("alice", "x", kind=kind, thread=task.thread)  # type: ignore[arg-type]
+    assert len(alice.store.read_all().events) == count
 
 
 def test_a_thread_post_does_not_ack_a_message_addressed_to_the_sender(
@@ -137,11 +151,11 @@ def test_a_thread_post_does_not_ack_a_message_addressed_to_the_sender(
     assert [e for e in bob.store.read_all().events if isinstance(e, AckEvent)] == []
 
 
-def test_a_result_follow_up_after_a_result_works_by_thread(alice: Bus, bob: Bus) -> None:
+def test_a_text_follow_up_after_a_result_works_by_thread(alice: Bus, bob: Bus) -> None:
     task = alice.send("bob", "do it", kind="task")
     first = bob.send("alice", "done", kind="result", reply_to=task.id)
-    second = bob.send("alice", "also done", kind="result", thread=task.thread)
-    assert second.kind == "result"
+    second = bob.send("alice", "also this", kind="text", thread=task.thread)
+    assert second.kind == "text"
     assert second.thread == first.thread == task.thread
     assert second.reply_to is None
 
@@ -209,7 +223,8 @@ def test_a_thread_post_keeps_the_rate_limit_secret_and_body_checks(alice: Bus, b
         alice.send("bob", f"a{i}", thread=task.thread)
     with pytest.raises(RateLimitError, match="await_human"):
         alice.send("bob", "over the limit", thread=task.thread)
-    handoff = alice.send("bob", "handoff", kind="await_human", thread=task.thread)
+    # The hand-off is not a thread post; it is the way past the limit.
+    handoff = alice.send("bob", "handoff", kind="await_human")
     assert handoff.kind == "await_human"
 
 

@@ -155,8 +155,15 @@ def test_check_thread_post_prefixes_are_exact() -> None:
 
 def test_check_thread_post_accepts_both_directions_whatever_the_root_kind() -> None:
     root = _root()
-    check_thread_post(root, "R", "alice", "bob")
-    check_thread_post(root, "R", "bob", "alice")
+    for kind in ("task", "text"):
+        check_thread_post(root, "R", "alice", "bob", kind)
+        check_thread_post(root, "R", "bob", "alice", kind)
+
+
+@pytest.mark.parametrize("kind", ["result", "await_human"])
+def test_check_thread_post_refuses_a_result_and_a_handoff(kind: str) -> None:
+    with pytest.raises(BusError, match="a thread post must be kind task or text"):
+        check_thread_post(_root(), "R", "alice", "bob", kind)
 
 
 def test_team_names_follow_the_agent_name_rule() -> None:
